@@ -1,0 +1,899 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Perply hype scene</title>
+<style>
+  @font-face { font-family: 'DM Sans'; src: url(assets/fonts/dm-sans-bold.ttf); font-weight: 700; }
+  @font-face { font-family: 'DM Sans'; src: url(assets/fonts/dm-sans-regular.ttf); font-weight: 400; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// Deterministic, time-driven scene: render(t) draws the frame at t seconds.
+// Beat grid: 150 BPM -> beat 0.4 s, bar 1.6 s (matches music.py).
+const W = 1920, H = 1080, B = 0.4, DUR = 33.5;
+const C = {
+  bg: '#04181c', panel: '#091f25', raised: '#102b32', line: '#234149', ink: '#eef9f7',
+  muted: '#a4bcc1', mint: '#6fe6d3', light: '#a4f5e9', accent: '#68efcf', cyan: '#34b7dd',
+  red: '#ff9eaf', deep: '#0d6c68', dark: '#021013'
+};
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+// ------------------------------------------------------------------ utils
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eOutExpo = x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x);
+const eOutCubic = x => 1 - Math.pow(1 - x, 3);
+const eInCubic = x => x * x * x;
+const eInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const eOutBack = x => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+function env(t, times, decay) {
+  let v = 0;
+  for (const ti of times) if (t >= ti - 1e-6) v = Math.max(v, Math.exp(-(t - ti) * decay));
+  return v;
+}
+function lastHit(t, times) { let r = null; for (const ti of times) if (t >= ti - 1e-6) r = ti; return r; }
+const range = (a, b, step) => { const r = []; for (let x = a; x < b - 1e-6; x += step) r.push(+x.toFixed(3)); return r; };
+
+const KICKS = [...range(3.2, 20.8, B), 20.8, 21.2, 21.6, ...range(22.4, 28.8, B), 28.8];
+const INTRO_HITS = [0.8, 1.6, 2.0, 2.2, 2.4];
+const MONTAGE = range(16.0, 19.2, B);
+const STUTTER = [19.2, 19.6, 20.0, 20.2, 20.4, 20.6];
+const BIG = [3.2, 22.4, 28.8];
+
+function font(size, o = {}) {
+  return o.mono ? `${o.weight || 700} ${size}px "JetBrains Mono"` : `${o.weight || 700} ${size}px "DM Sans"`;
+}
+function setFont(size, o = {}) {
+  ctx.font = font(size, o);
+  ctx.letterSpacing = (o.ls != null ? o.ls : (o.mono ? size * 0.14 : -size * 0.045)) + 'px';
+}
+function measure(s, size, o = {}) {
+  ctx.save(); setFont(size, o); const w = ctx.measureText(s).width; ctx.restore(); return w;
+}
+function fit(s, maxW, maxSize, o = {}) { return Math.min(maxSize, maxW / measure(s, 100, o) * 100); }
+
+function txt(s, x, y, o = {}) {
+  const size = o.size || 100;
+  ctx.save();
+  setFont(size, o);
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = o.base || 'alphabetic';
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  if (o.chroma && o.chroma > 0.3) {
+    const d = o.chroma;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255,70,130,.6)'; ctx.fillText(s, x - d, y);
+    ctx.fillStyle = 'rgba(40,210,255,.6)'; ctx.fillText(s, x + d, y);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  if (o.glow) { ctx.shadowColor = o.glowColor || 'rgba(111,230,211,.8)'; ctx.shadowBlur = o.glow; }
+  ctx.fillStyle = o.color || C.ink;
+  if (o.stroke) { ctx.strokeStyle = o.color || C.ink; ctx.lineWidth = o.stroke; ctx.strokeText(s, x, y); }
+  else ctx.fillText(s, x, y);
+  ctx.restore();
+}
+
+// text that slides up out of a mask
+function reveal(s, x, y, p, o = {}) {
+  if (p <= 0) return;
+  const size = o.size || 100;
+  const w = measure(s, size, o);
+  const al = o.align || 'left';
+  const x0 = al === 'left' ? x : al === 'center' ? x - w / 2 : x - w;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0 - 40, y - size * 1.05, w + 80, size * 1.4);
+  ctx.clip();
+  txt(s, x, y + (1 - eOutExpo(p)) * size * 1.2, o);
+  ctx.restore();
+}
+
+// word that punches in on a hit
+function punch(s, x, y, k, o = {}) {
+  const sc = (o.base || 1) * (1 + (o.from ?? 0.3) * Math.exp(-k * 16)) * (1 + (o.drift ?? 0.04) * k);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(sc, sc);
+  txt(s, 0, 0, { ...o, align: o.align || 'center', base: 'middle', chroma: (o.chroma ?? 22) * Math.exp(-k * 9) });
+  ctx.restore();
+}
+
+function rrect(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+
+// ------------------------------------------------------------------ assets
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; }); }
+let EMB, MARK, SITE, GRAIN;
+window.ready = (async () => {
+  [EMB, MARK, SITE] = await Promise.all([
+    loadImg('assets/brand/perply-emblem.svg'),
+    loadImg('assets/brand/perply-mark.svg'),
+    loadImg('assets/site-hero.png'),
+  ]);
+  await Promise.all([
+    document.fonts.load('700 100px "DM Sans"'),
+    document.fonts.load('400 40px "DM Sans"'),
+    document.fonts.load('700 40px "JetBrains Mono"'),
+    document.fonts.load('400 40px "JetBrains Mono"'),
+  ]);
+  GRAIN = document.createElement('canvas');
+  GRAIN.width = GRAIN.height = 384;
+  const g = GRAIN.getContext('2d');
+  const id = g.createImageData(384, 384);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.floor(hash(i * 0.37) * 255);
+    id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255;
+  }
+  g.putImageData(id, 0, 0);
+  return true;
+})();
+
+// ------------------------------------------------------------------ layers
+function bg(tint = 'rgba(18,110,104,0.55)', cx = W * 0.62, cy = H * 0.45, base = C.bg) {
+  ctx.fillStyle = base; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, W * 0.75);
+  g.addColorStop(0, tint); g.addColorStop(1, 'rgba(4,24,28,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+
+function ribbons(t, alpha, o = {}) {
+  if (alpha <= 0) return;
+  const lg = ctx.createLinearGradient(0, 0, W, 0);
+  const col = o.rgb || '87,249,219';
+  lg.addColorStop(0, `rgba(${col},0)`); lg.addColorStop(.5, `rgba(${col},.65)`); lg.addColorStop(1, `rgba(${col},0)`);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = lg;
+  ctx.lineWidth = o.lw || 1.6;
+  const sp = o.speed || 1, yb = o.y ?? H * 0.66, amp = o.amp || 1;
+  for (let r = 0; r < 8; r++) {
+    ctx.beginPath();
+    for (let x = -60; x <= W + 60; x += 16) {
+      const y = yb + r * 15 + amp * (Math.sin(x * 0.0031 + t * 0.9 * sp + r * 0.1) * 150 + Math.sin(x * 0.0012 - t * 0.45 * sp) * 95);
+      x === -60 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function dust(t, alpha, speed = 1, color = '111,230,211') {
+  if (alpha <= 0) return;
+  ctx.save();
+  for (let i = 0; i < 110; i++) {
+    const x = ((hash(i) * W + t * 18 * (0.3 + hash(i + 9)) * speed) % W + W) % W;
+    const y = ((hash(i + 3) * H - t * (25 + 55 * hash(i + 5)) * speed) % H + H) % H;
+    const r = 0.8 + hash(i + 7) * 2.2;
+    ctx.globalAlpha = alpha * (0.25 + 0.75 * hash(i + 11)) * (0.6 + 0.4 * Math.sin(t * 3 + i));
+    ctx.fillStyle = `rgb(${color})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function warp(t, k, cx = W / 2, cy = H / 2, color = C.light) {
+  if (k <= 0.01) return;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineCap = 'round';
+  for (let i = 0; i < 150; i++) {
+    const a = hash(i) * Math.PI * 2;
+    const sp = 0.5 + hash(i + 1) * 1.3;
+    const d = (hash(i + 2) + t * sp * 1.3) % 1;
+    const r0 = 60 + d * d * 1500;
+    const len = (20 + d * 300) * k;
+    ctx.globalAlpha = clamp(d * 1.6) * 0.55 * k;
+    ctx.lineWidth = 1 + d * 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * (r0 + len), cy + Math.sin(a) * (r0 + len));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function rings(t, times, cx, cy, o = {}) {
+  for (const t0 of times) {
+    const k = t - t0;
+    const life = o.life || 1.2;
+    if (k < 0 || k > life) continue;
+    const p = eOutCubic(k / life);
+    ctx.save();
+    ctx.globalAlpha = (1 - p) * (o.alpha ?? 0.9);
+    ctx.strokeStyle = o.color || C.mint;
+    ctx.lineWidth = (o.lw || 12) * (1 - p) + 1;
+    ctx.beginPath(); ctx.arc(cx, cy, (o.r0 || 120) + p * (o.r1 || 1100), 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function burst(t, t0, cx, cy, o = {}) {
+  const k = t - t0;
+  if (k < 0 || k > 1.6) return;
+  ctx.save();
+  for (let i = 0; i < (o.n || 70); i++) {
+    const a = hash(i + t0 * 13) * Math.PI * 2;
+    const sp = 400 + hash(i + 5 + t0) * 1300;
+    const d = sp * (1 - Math.exp(-k * 3.2)) / 3.2 * 3;
+    const r = (2 + hash(i + 2) * 5) * (1 - k / 1.6);
+    ctx.globalAlpha = (1 - k / 1.6) * 0.9;
+    ctx.fillStyle = hash(i + 4) > 0.75 ? C.ink : C.mint;
+    ctx.beginPath(); ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function emblem(cx, cy, size, o = {}) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(o.rot || 0);
+  ctx.scale(o.sx ?? 1, 1);
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  if (o.glow) { ctx.shadowColor = 'rgba(60,241,215,.75)'; ctx.shadowBlur = o.glow; }
+  ctx.drawImage(EMB, -size / 2, -size / 2, size, size);
+  ctx.restore();
+}
+
+function mark(cx, cy, size, alpha = 1) {
+  ctx.save(); ctx.globalAlpha *= alpha;
+  ctx.drawImage(MARK, cx - size / 2, cy - size / 2, size, size);
+  ctx.restore();
+}
+
+// price-ish line, purely illustrative
+function chart(x0, y0, w, h, prog, color, seed, dir, o = {}) {
+  if (prog <= 0) return;
+  const n = 140, pts = [];
+  for (let i = 0; i <= n * prog; i++) {
+    const u = i / n;
+    let v = dir * (Math.pow(u, 1.7) * 1.6 - 0.8);
+    v += 0.09 * Math.sin(u * 21 + seed) + 0.05 * Math.sin(u * 63 + seed * 2) + 0.03 * (hash(i + seed) - .5);
+    pts.push([x0 + u * w, y0 + h / 2 - v * h / 2]);
+  }
+  ctx.save();
+  // area
+  const g = ctx.createLinearGradient(0, y0, 0, y0 + h);
+  g.addColorStop(0, o.fill || 'rgba(111,230,211,.28)'); g.addColorStop(1, 'rgba(111,230,211,0)');
+  ctx.beginPath(); ctx.moveTo(pts[0][0], y0 + h);
+  pts.forEach(p => ctx.lineTo(p[0], p[1]));
+  ctx.lineTo(pts[pts.length - 1][0], y0 + h); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
+  // line
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.strokeStyle = color; ctx.lineWidth = o.lw || 6; ctx.lineJoin = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = o.blur ?? 24;
+  ctx.stroke();
+  const hd = pts[pts.length - 1];
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(hd[0], hd[1], (o.lw || 6) * 1.8, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath(); ctx.arc(hd[0], hd[1], (o.lw || 6) * 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function arrow(cx, cy, size, dir, color, alpha = 1) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(dir > 0 ? -Math.PI / 4 : Math.PI / 4);
+  ctx.globalAlpha *= alpha;
+  ctx.strokeStyle = color; ctx.lineWidth = size * 0.13; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = 30;
+  ctx.beginPath();
+  ctx.moveTo(-size / 2, 0); ctx.lineTo(size / 2, 0);
+  ctx.moveTo(size / 2 - size * 0.32, -size * 0.32); ctx.lineTo(size / 2, 0); ctx.lineTo(size / 2 - size * 0.32, size * 0.32);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function eyebrow(s, x, y, alpha = 1, color = C.mint, line = true) {
+  if (line) { ctx.save(); ctx.globalAlpha *= alpha; ctx.fillStyle = color; ctx.fillRect(x, y - 8, 40, 3); ctx.restore(); }
+  txt(s, x + (line ? 58 : 0), y, { size: 22, mono: true, color, alpha });
+}
+
+function typed(s, p) { return s.slice(0, Math.floor(s.length * clamp(p) + 1e-6)); }
+
+// ------------------------------------------------------------------ UI mockups (site copy)
+function ticket(x, y, sc, st, t) {
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(sc, sc);
+  ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 60; ctx.shadowOffsetY = 30;
+  rrect(0, 0, 520, 680, 20, C.panel);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  rrect(0, 0, 520, 680, 20, null, C.line, 2);
+  txt('Trade', 32, 60, { size: 30 });
+  // direction
+  rrect(32, 88, 456, 66, 12, C.raised);
+  const long = st.side === 'long';
+  const segX = long ? 36 : 260;
+  rrect(segX, 92, 224, 58, 10, long ? 'rgba(104,239,207,.16)' : 'rgba(255,158,175,.16)', long ? C.accent : C.red, 2 + st.sideGlow * 3);
+  txt('Long', 148, 131, { size: 24, align: 'center', color: long ? C.accent : C.muted });
+  txt('Short', 372, 131, { size: 24, align: 'center', color: long ? C.muted : C.red });
+  // margin
+  txt('Margin (HYPE)', 32, 200, { size: 19, weight: 400, color: C.muted, ls: 0 });
+  rrect(32, 214, 456, 66, 12, '#061a1f', st.focus === 'margin' ? C.mint : C.line, 2);
+  txt(st.margin || '0.00', 54, 258, { size: 28, color: st.margin ? C.ink : '#4d6a70', weight: st.margin ? 700 : 400 });
+  if (st.focus === 'margin' && Math.floor(t * 4) % 2 === 0) {
+    const w = st.margin ? measure(st.margin, 28) : 0;
+    ctx.fillStyle = C.mint; ctx.fillRect(58 + w, 232, 3, 32);
+  }
+  txt('HYPE', 466, 256, { size: 18, mono: true, color: C.muted, align: 'right' });
+  // leverage
+  txt('Leverage', 32, 324, { size: 19, weight: 400, color: C.muted, ls: 0 });
+  rrect(32, 338, 456, 62, 12, C.raised);
+  const levs = ['1×', '1.5×', '2×'];
+  levs.forEach((l, i) => {
+    const sx = 36 + i * 150;
+    if (i === st.lev) {
+      ctx.save();
+      const pop = 1 + 0.12 * st.levPop;
+      ctx.translate(sx + 74, 369); ctx.scale(pop, pop);
+      rrect(-74, -27, 148, 54, 10, 'rgba(104,239,207,.18)', C.accent, 2 + 3 * st.levPop);
+      ctx.restore();
+    }
+    txt(l, sx + 74, 378, { size: 24, align: 'center', color: i === st.lev ? C.accent : C.muted });
+  });
+  // details (site copy)
+  txt('Entry slippage', 32, 452, { size: 19, weight: 400, color: C.muted, ls: 0 });
+  txt('1 %', 488, 452, { size: 19, color: C.ink, align: 'right', ls: 0 });
+  ctx.fillStyle = C.line; ctx.fillRect(32, 476, 456, 1);
+  txt('Margin asset', 32, 512, { size: 19, weight: 400, color: C.muted, ls: 0 });
+  txt('HYPE', 488, 512, { size: 19, color: C.ink, align: 'right', ls: 0 });
+  txt('Leverage', 32, 546, { size: 19, weight: 400, color: C.muted, ls: 0 });
+  txt('Within market limits', 488, 546, { size: 19, weight: 400, color: C.ink, align: 'right', ls: 0 });
+  // button
+  const pr = st.press;
+  ctx.save();
+  ctx.translate(260, 620);
+  const bs = 1 - 0.05 * Math.sin(Math.PI * clamp(pr * 4));
+  ctx.scale(bs, bs);
+  if (st.btnGlow) { ctx.shadowColor = 'rgba(111,230,211,.9)'; ctx.shadowBlur = 50 * st.btnGlow; }
+  rrect(-228, -36, 456, 72, 14, st.side === 'long' ? C.mint : C.red);
+  ctx.shadowColor = 'transparent';
+  const levTxt = ['1x', '1.5x', '2x'][st.lev];
+  txt(`Open ${levTxt} ${st.side}`, 0, 10, { size: 26, color: C.dark, align: 'center' });
+  if (pr > 0 && pr < 1) {
+    ctx.save(); ctx.beginPath(); ctx.roundRect(-228, -36, 456, 72, 14); ctx.clip();
+    ctx.globalAlpha = 0.55 * (1 - pr); ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(0, 0, eOutCubic(pr) * 480, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+  // focus ring
+  if (st.ring) {
+    const r = st.ring;
+    ctx.save();
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t * 10);
+    rrect(r[0] - 10, r[1] - 10, r[2] + 20, r[3] + 20, 18, null, C.light, 3);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function deskPanel(x, y, sc, t, mode, p, flow) {
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(sc, sc);
+  ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 60; ctx.shadowOffsetY = 30;
+  rrect(0, 0, 600, 680, 20, C.panel);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  rrect(0, 0, 600, 680, 20, null, C.line, 2);
+  // topbar
+  ctx.drawImage(MARK, 28, 22, 30, 30);
+  txt('Terminal walkthrough', 70, 45, { size: 18, color: C.muted, weight: 400, ls: 0 });
+  rrect(400, 20, 172, 34, 17, 'rgba(111,230,211,.08)', 'rgba(111,230,211,.35)', 1.5);
+  txt('Interface preview', 486, 43, { size: 15, color: C.mint, align: 'center', weight: 400, ls: 0 });
+  ctx.fillStyle = C.line; ctx.fillRect(0, 74, 600, 1);
+  if (mode === 'market') {
+    txt('MARKET SELECTION', 32, 122, { size: 17, mono: true, color: C.mint });
+    txt('Inspect the market.', 32, 172, { size: 40 });
+    // grid
+    ctx.strokeStyle = 'rgba(35,65,73,.7)'; ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.moveTo(32, 210 + i * 50); ctx.lineTo(568, 210 + i * 50); ctx.stroke(); }
+    chart(32, 210, 536, 200, p, C.mint, 3.1, 1, { lw: 4, blur: 16 });
+    const rows = [['Published mark', 'From the market feed'], ['Reserve & open interest', 'From the contract'], ['Recent activity', 'Indexed transactions']];
+    rows.forEach((r, i) => {
+      const a = clamp((p - 0.2 - i * 0.15) * 4);
+      ctx.fillStyle = C.line; ctx.fillRect(32, 452 + i * 64, 536, 1);
+      txt(r[0], 32, 490 + i * 64, { size: 21, alpha: a, ls: 0 });
+      txt(r[1], 568, 490 + i * 64, { size: 19, weight: 400, color: C.muted, align: 'right', alpha: a, ls: 0 });
+    });
+    // scan line
+    const sy = 90 + ((t * 0.9) % 1) * 580;
+    const g = ctx.createLinearGradient(0, sy - 40, 0, sy);
+    g.addColorStop(0, 'rgba(111,230,211,0)'); g.addColorStop(1, 'rgba(111,230,211,.22)');
+    ctx.fillStyle = g; ctx.fillRect(2, sy - 40, 596, 40);
+    ctx.fillStyle = 'rgba(164,245,233,.6)'; ctx.fillRect(2, sy, 596, 1.5);
+  } else {
+    txt('WALLET REVIEW', 32, 122, { size: 17, mono: true, color: C.mint });
+    txt('Review, then approve.', 32, 172, { size: 40 });
+    const nodes = ['Review', 'Wallet', 'Confirm'];
+    const nx = [110, 300, 490];
+    ctx.strokeStyle = C.line; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(110, 290); ctx.lineTo(490, 290); ctx.stroke();
+    const lp = clamp((flow - 0.5) / 2);
+    ctx.strokeStyle = C.mint; ctx.shadowColor = C.mint; ctx.shadowBlur = 16;
+    ctx.beginPath(); ctx.moveTo(110, 290); ctx.lineTo(110 + 380 * lp, 290); ctx.stroke();
+    ctx.shadowBlur = 0;
+    nodes.forEach((n, i) => {
+      const on = flow >= i + 0.001;
+      const k = on ? Math.exp(-(flow - i) * 4) : 0;
+      ctx.save();
+      ctx.translate(nx[i], 290); ctx.scale(1 + 0.25 * k, 1 + 0.25 * k);
+      if (on) { ctx.shadowColor = C.mint; ctx.shadowBlur = 30; }
+      ctx.beginPath(); ctx.arc(0, 0, 34, 0, Math.PI * 2);
+      ctx.fillStyle = on ? C.mint : C.raised; ctx.fill();
+      ctx.lineWidth = 2; ctx.strokeStyle = on ? C.light : C.line; ctx.stroke();
+      ctx.shadowBlur = 0;
+      if (on) { // check
+        ctx.strokeStyle = C.dark; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath(); ctx.moveTo(-13, 1); ctx.lineTo(-4, 11); ctx.lineTo(14, -9); ctx.stroke();
+      }
+      ctx.restore();
+      txt(n, nx[i], 362, { size: 22, align: 'center', color: on ? C.ink : C.muted, ls: 0 });
+    });
+    const rows = [['Entry bounds', 'Checked before signing'], ['Transaction outcome', 'Tracked onchain']];
+    rows.forEach((r, i) => {
+      const a = clamp((flow - 1 - i * 0.5) * 3);
+      ctx.fillStyle = C.line; ctx.fillRect(32, 430 + i * 70, 536, 1);
+      txt(r[0], 32, 472 + i * 70, { size: 21, alpha: a, ls: 0 });
+      txt(r[1], 568, 472 + i * 70, { size: 19, weight: 400, color: C.mint, align: 'right', alpha: a, ls: 0 });
+    });
+    txt('Your position and transaction history', 32, 618, { size: 18, weight: 400, color: C.muted, ls: 0, alpha: clamp((flow - 2) * 3) });
+    txt('remain accessible from the desk.', 32, 644, { size: 18, weight: 400, color: C.muted, ls: 0, alpha: clamp((flow - 2) * 3) });
+  }
+  ctx.restore();
+}
+
+function browser(x, y, w, t, url) {
+  const ih = w * 760 / 1920, bh = 58;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.shadowColor = 'rgba(60,241,215,.45)'; ctx.shadowBlur = 80;
+  rrect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18, C.raised);
+  ctx.shadowColor = 'transparent';
+  ctx.save();
+  ctx.beginPath(); ctx.roundRect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18); ctx.clip();
+  ctx.drawImage(SITE, -w / 2, -(ih + bh) / 2 + bh, w, ih);
+  ctx.restore();
+  rrect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18, null, 'rgba(111,230,211,.55)', 2);
+  const ty = -(ih + bh) / 2 + bh / 2;
+  ['#ff9eaf', '#f1c97a', '#6fe6d3'].forEach((c, i) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(-w / 2 + 30 + i * 24, ty, 7, 0, Math.PI * 2); ctx.fill(); });
+  rrect(-260, ty - 18, 520, 36, 18, '#061a1f', C.line, 1.5);
+  // lock
+  ctx.strokeStyle = C.mint; ctx.lineWidth = 2.2;
+  ctx.strokeRect(-236, ty - 4, 14, 11);
+  ctx.beginPath(); ctx.arc(-229, ty - 4, 5, Math.PI, 0); ctx.stroke();
+  txt(url, -206, ty + 7, { size: 19, mono: true, weight: 400, color: C.ink, ls: 0.5 });
+  if (url.length < 11 || Math.floor(t * 4) % 2 === 0) {
+    const uw = measure(url, 19, { mono: true, weight: 400, ls: 0.5 });
+    ctx.fillStyle = C.mint; ctx.fillRect(-204 + uw, ty - 10, 2, 20);
+  }
+  ctx.restore();
+}
+
+// ------------------------------------------------------------------ scenes
+function sIntro(t) {
+  bg('rgba(18,110,104,' + (0.15 + 0.3 * P(t, 0, 2.8)) + ')', W / 2, H / 2);
+  ribbons(t, 0.35 * P(t, 0, 1.2), { speed: 1.6 });
+  dust(t, 0.6 * P(t, 0, 1));
+  if (t < 0.8) {
+    const s = typed('PERPLY / ELYSIUM', P(t, 0.05, 0.6));
+    txt(s, W / 2, H / 2 + 10, { size: 34, mono: true, color: C.mint, align: 'center' });
+    if (Math.floor(t * 6) % 2 === 0) {
+      const w = measure('PERPLY / ELYSIUM', 34, { mono: true });
+      const sw = measure(s, 34, { mono: true });
+      ctx.fillStyle = C.mint; ctx.fillRect(W / 2 - w / 2 + sw + 4, H / 2 - 18, 16, 34);
+    }
+    return;
+  }
+  const words = [[0.8, 'ELYSIUM', C.ink], [1.6, 'MEMECOINS', C.ink], [2.0, 'JUST', C.ink], [2.2, 'GOT', C.ink], [2.4, 'PERPS.', C.mint]];
+  let cur = words[0];
+  for (const w of words) if (t >= w[0]) cur = w;
+  const k = t - cur[0];
+  let size = fit(cur[1], 1600, 330);
+  ctx.save();
+  if (t > 2.8) { // suck-in before the drop
+    const q = eInCubic(P(t, 2.8, 3.2));
+    ctx.translate(W / 2, H / 2); ctx.scale(1 + q * 6, 1 + q * 6); ctx.translate(-W / 2, -H / 2);
+    ctx.globalAlpha = 1 - q;
+  }
+  punch(cur[1], W / 2, H / 2, k, { size, color: cur[2], from: 0.35, glow: cur[2] === C.mint ? 40 : 0 });
+  ctx.restore();
+  if (cur[1] === 'ELYSIUM' || cur[1] === 'MEMECOINS') {
+    txt(cur[1] === 'ELYSIUM' ? 'ON' : 'ELYSIUM', W / 2, H / 2 - size * 0.62, { size: 30, mono: true, color: C.mint, align: 'center', alpha: P(t, cur[0] + 0.1, cur[0] + 0.3) * 0 });
+  }
+}
+
+function sDrop1(t) {
+  const k = t - 3.2;
+  bg('rgba(24,140,130,.6)', W / 2, H * 0.44);
+  warp(t, 1.2 * Math.exp(-k * 1.3) + 0.25, W / 2, H * 0.44);
+  ribbons(t, 0.4, { speed: 2.5 });
+  rings(t, [3.2], W / 2, H * 0.44, { r0: 200, r1: 1300, lw: 26, life: 1.1 });
+  rings(t, KICKS.filter(x => x > 3.2 && x < 4.8), W / 2, H * 0.44, { r0: 280, r1: 500, lw: 6, alpha: 0.35, life: 0.4 });
+  burst(t, 3.2, W / 2, H * 0.44, { n: 90 });
+  const s = lerp(3.2, 1, eOutExpo(clamp(k / 0.35)));
+  const pulse = 1 + 0.045 * env(t, KICKS, 12);
+  emblem(W / 2, H * 0.44 + Math.sin(t * 3) * 8, 640 * s * pulse, { rot: (1 - eOutExpo(clamp(k / 0.4))) * -0.8, glow: 40 });
+  const word = 'perply';
+  const n = clamp(Math.floor((t - 3.6) / (B / 4)) + 1, 0, 6);
+  if (t >= 3.6) {
+    const full = measure(word, 150, { ls: -5 });
+    const part = word.slice(0, n);
+    txt(part, W / 2 - full / 2, H * 0.9, { size: 150, ls: -5, glow: 30, chroma: 12 * env(t, range(3.6, 4.2, B / 4), 14) });
+  }
+}
+
+function sLong(t, short) {
+  const t0 = short ? 6.4 : 4.8, k = t - t0;
+  const col = short ? C.red : C.accent;
+  bg(short ? 'rgba(120,40,60,.55)' : 'rgba(20,150,130,.6)', short ? W * 0.25 : W * 0.75, short ? H * 0.75 : H * 0.3);
+  ribbons(t, 0.25, { speed: 3, rgb: short ? '255,158,175' : '87,249,219', y: H * 0.5 });
+  dust(t, 0.6, 3, short ? '255,158,175' : '111,230,211');
+  // grid
+  ctx.save(); ctx.strokeStyle = 'rgba(164,188,193,.07)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 120) { ctx.beginPath(); ctx.moveTo(x + ((t * 120) % 120) * (short ? -1 : 1), 0); ctx.lineTo(x + ((t * 120) % 120) * (short ? -1 : 1), H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 120) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  ctx.restore();
+  const cp = eOutCubic(P(t, t0, t0 + 1.2));
+  chart(-40, 120, W + 80, 840, cp, col, short ? 7 : 1, short ? -1 : 1, { lw: 9, blur: 40, fill: short ? 'rgba(255,158,175,.22)' : 'rgba(111,230,211,.25)' });
+  const size = 330;
+  const word = short ? 'SHORT.' : 'LONG.';
+  const x = short ? W - 130 : 130, al = short ? 'right' : 'left';
+  const y = short ? 380 : 840;
+  ctx.save();
+  const sc = 1 + 0.25 * Math.exp(-k * 14);
+  ctx.translate(x, y); ctx.scale(sc, sc); ctx.translate(-x, -y);
+  reveal(word, x, y, P(t, t0, t0 + 0.35), { size, color: C.ink, align: al, chroma: 20 * Math.exp(-k * 8) });
+  ctx.restore();
+  const ax = short ? W - 220 : 230, ay = short ? 560 : 520;
+  const ab = env(t, [t0 + 0.4, t0 + 0.8, t0 + 1.2], 10);
+  arrow(short ? W - 160 - measure(word, size) - 120 : 130 + measure(word, size) + 120, y - size * 0.35, 150 * (1 + 0.2 * ab), short ? -1 : 1, col, P(t, t0 + 0.3, t0 + 0.5));
+  const sub = short ? 'POSITIONED FOR A FALL' : 'POSITIONED FOR A RISE';
+  txt(typed(sub, P(t, t0 + 0.4, t0 + 0.9)), x, short ? y + 90 : y - size * 0.85, { size: 30, mono: true, color: col, align: al });
+}
+
+function sHype(t) {
+  const t0 = 8.0, k = t - t0;
+  bg('rgba(20,150,130,.5)', W / 2, H / 2);
+  ribbons(t, 0.3, { speed: 2 });
+  // orbiting coins
+  ctx.save();
+  for (let i = 0; i < 18; i++) {
+    const a = i / 18 * Math.PI * 2 + t * 0.9;
+    const rx = 760, ry = 300;
+    const x = W / 2 + Math.cos(a) * rx, y = H / 2 + Math.sin(a) * ry * 0.9;
+    const z = (Math.sin(a) + 1) / 2;
+    ctx.globalAlpha = 0.2 + 0.6 * z;
+    ctx.fillStyle = i % 3 ? C.mint : C.light;
+    ctx.beginPath(); ctx.arc(x, y, 6 + 10 * z, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+  const zoom = 1 + 0.06 * k + (t > 9.3 ? eInCubic(P(t, 9.3, 9.6)) * 0.6 : 0);
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(zoom, zoom); ctx.translate(-W / 2, -H / 2);
+  ctx.globalAlpha = 1 - P(t, 9.4, 9.6);
+  // HYPE in token-tag box
+  if (t >= 8.0) {
+    const kk = t - 8.0;
+    const sc = 1 + 0.3 * Math.exp(-kk * 14);
+    ctx.save(); ctx.translate(W / 2, 430); ctx.scale(sc, sc);
+    const w = measure('HYPE', 300) + 110;
+    rrect(-w / 2, -175, w, 270, 28, 'rgba(111,230,211,.12)', C.mint, 5);
+    txt('HYPE', 0, 0, { size: 300, color: C.mint, align: 'center', base: 'middle', glow: 40, chroma: 20 * Math.exp(-kk * 9) });
+    ctx.restore();
+  }
+  if (t >= 8.4) punch('MARGIN.', W / 2, 730, t - 8.4, { size: 210, from: 0.3 });
+  txt(typed('Long and short Elysium memecoins with HYPE margin.', P(t, 8.8, 9.3)), W / 2, 905, { size: 34, weight: 400, color: C.muted, align: 'center', ls: 0 });
+  ctx.restore();
+}
+
+function uiState(t) {
+  const st = { side: 'long', sideGlow: 0, lev: 2, levPop: 0, margin: '', focus: null, press: 0, btnGlow: 0, ring: null };
+  const sides = [[11.2, 'short'], [11.6, 'long'], [12.0, 'short'], [12.4, 'long']];
+  for (const [ti, s] of sides) if (t >= ti) { st.side = s; st.sideGlow = Math.exp(-(t - ti) * 8); }
+  const levs = [[12.8, 0], [13.2, 1], [13.6, 2]];
+  for (const [ti, l] of levs) if (t >= ti) { st.lev = l; st.levPop = Math.exp(-(t - ti) * 9); }
+  if (t >= 13.7) { st.margin = typed('25.00', P(t, 13.7, 14.2)); st.focus = t < 14.4 ? 'margin' : null; }
+  if (t >= 14.4) { st.press = clamp((t - 14.4) / 0.6); st.btnGlow = Math.exp(-(t - 14.4) * 3); }
+  if (t >= 11.2 && t < 12.8) st.ring = [32, 88, 456, 66];
+  else if (t >= 12.8 && t < 13.7) st.ring = [32, 338, 456, 62];
+  else if (t >= 13.7 && t < 14.4) st.ring = [32, 584, 456, 72];
+  return st;
+}
+
+function sTerminal(t) {
+  bg('rgba(18,110,104,.45)', W * 0.7, H * 0.5);
+  ribbons(t, 0.22, { speed: 1.2, y: H * 0.78 });
+  dust(t, 0.4);
+  if (t < 10.4) {
+    const k = t - 9.6;
+    warp(t, 0.8 * Math.exp(-k * 3), W / 2, H / 2);
+    rings(t, [9.6], W / 2, H / 2, { r0: 300, r1: 900, lw: 14 });
+    punch('ONE', W / 2, H / 2 - 150, k, { size: 200, color: C.mint, from: 0.4, glow: 30 });
+    if (t >= 10.0) punch('TERMINAL.', W / 2, H / 2 + 110, t - 10.0, { size: 260, from: 0.35 });
+    return;
+  }
+  const kshake = env(t, KICKS, 14) * 3;
+  const zoom = 1 + 0.05 * P(t, 10.4, 16.0) + 0.008 * env(t, KICKS, 12);
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(zoom, zoom); ctx.rotate(-0.012); ctx.translate(-W / 2 + (hash(t * 99) - .5) * kshake, -H / 2 + (hash(t * 77) - .5) * kshake);
+  // panels fly in
+  const e1 = eOutExpo(P(t, 10.4, 11.0)), e2 = eOutExpo(P(t, 10.55, 11.15));
+  const mode = t < 14.4 ? 'market' : 'review';
+  const flow = t < 14.4 ? 0 : t < 14.8 ? 0 : t < 15.2 ? 1 + (t - 14.8) : t < 15.6 ? 2 + (t - 15.2) : 3;
+  const flowV = t < 14.8 ? 0 : (t - 14.8) / 0.4;
+  ctx.save(); ctx.globalAlpha = e1;
+  deskPanel(640 + (1 - e1) * 500, 200 + (1 - e1) * 60, 1, t, mode, P(t, 10.5, 11.6), flowV);
+  ctx.restore();
+  if (mode === 'review') { // flash panel on swap
+    ctx.save(); ctx.globalAlpha = 0.6 * Math.exp(-(t - 14.4) * 8); rrect(640, 200, 600, 680, 20, C.light); ctx.restore();
+  }
+  ctx.save(); ctx.globalAlpha = e2;
+  ticket(1270 + (1 - e2) * 600, 200 - (1 - e2) * 40, 1, uiState(t), t);
+  ctx.restore();
+  ctx.restore();
+  // captions (left)
+  const steps = [[10.4, '01 / MARKET', 'Choose your', 'market.'], [11.2, '02 / DIRECTION', 'Long or', 'short.'], [12.8, '03 / LEVERAGE', 'Set your', 'leverage.'], [14.4, '04 / APPROVE', 'Review, then', 'approve.']];
+  let cur = steps[0];
+  for (const s of steps) if (t >= s[0]) cur = s;
+  const p = P(t, cur[0], cur[0] + 0.35);
+  eyebrow(cur[1], 110, 380, p);
+  reveal(cur[2], 110, 500, p, { size: 84 });
+  reveal(cur[3], 110, 600, P(t, cur[0] + 0.06, cur[0] + 0.45), { size: 84, color: cur[1].startsWith('02') && uiState(t).side === 'short' ? C.red : C.mint });
+  // progress pips
+  steps.forEach((s, i) => { ctx.fillStyle = t >= s[0] ? C.mint : C.line; ctx.fillRect(110 + i * 58, 680, 46, 5); });
+}
+
+function sMontage(t) {
+  const i = Math.min(7, Math.floor((t - 16.0) / B));
+  const k = t - (16.0 + i * B);
+  const words = ['LONG.', 'SHORT.', 'HYPE', 'MARGIN.', 'WALLET-', 'APPROVED.', 'ELYSIUM', 'NATIVE.'];
+  const inv = i % 2 === 0;
+  const base = inv ? (i === 1 ? C.red : C.mint) : C.bg;
+  ctx.fillStyle = i === 1 ? C.bg : (inv ? C.mint : C.bg); ctx.fillRect(0, 0, W, H);
+  if (!inv) bg('rgba(24,140,130,.5)', W / 2, H / 2);
+  // diagonal stripes
+  ctx.save();
+  ctx.globalAlpha = inv ? 0.12 : 0.06;
+  ctx.fillStyle = inv ? C.dark : C.mint;
+  for (let x = -H; x < W + H; x += 90) {
+    const o = (t * 600) % 90;
+    ctx.beginPath(); ctx.moveTo(x + o, 0); ctx.lineTo(x + o + 40, 0); ctx.lineTo(x + o + 40 - H, H); ctx.lineTo(x + o - H, H); ctx.fill();
+  }
+  ctx.restore();
+  if (!inv) warp(t, 0.7, W / 2, H / 2);
+  const col = inv ? C.dark : (i === 1 ? C.red : C.ink);
+  const w = words[i];
+  const size = fit(w, 1700, 400);
+  // small emblem stamp
+  emblem(W / 2, H / 2, 900, { alpha: inv ? 0.0 : 0.09, rot: t * 0.6 });
+  const wordCol = i === 1 ? C.red : col;
+  punch(w, W / 2, H / 2 + 10, k, { size, color: wordCol, from: 0.22, chroma: inv ? 0 : 22 });
+  const tags = ['01', '02', '03', '04', '05', '06', '07', '08'];
+  txt(`PERPLY — ${tags[i]} / 08`, 110, 110, { size: 22, mono: true, color: inv ? C.dark : C.mint });
+  txt('ELYSIUM MEMECOIN PERPS', W - 110, H - 90, { size: 22, mono: true, color: inv ? C.dark : C.mint, align: 'right' });
+}
+
+function tunnel(t, speed, alpha) {
+  const n = 14;
+  for (let j = n - 1; j >= 0; j--) {
+    const z = ((j + speed) % n) / n;
+    const s = 40 + Math.pow(z, 3) * 3200;
+    ctx.save();
+    ctx.globalAlpha = alpha * clamp(z * 2) * clamp((1 - z) * 4);
+    ctx.translate(W / 2, H / 2); ctx.rotate(z * 0.6 + t * 0.2);
+    ctx.drawImage(MARK, -s / 2, -s / 2, s, s);
+    ctx.restore();
+  }
+}
+
+function sBuild(t) {
+  bg('rgba(18,110,104,' + (0.3 + 0.4 * P(t, 19.2, 22)) + ')', W / 2, H / 2);
+  if (t < 22.0) {
+    const q = P(t, 19.2, 22.0);
+    const sp = 2 * (t - 19.2) + 5 * q * q * (t - 19.2);
+    tunnel(t, sp, 0.2);
+    warp(t * (1 + q * 2), 0.3 + q, W / 2, H / 2);
+  }
+  if (t < 20.8) {
+    const letters = ['P', 'PE', 'PER', 'PERP', 'PERPL', 'PERPLY'];
+    let i = 0; for (let j = 0; j < STUTTER.length; j++) if (t >= STUTTER[j]) i = j;
+    const k = t - STUTTER[i];
+    const shake = 4 + 22 * P(t, 20.4, 20.8);
+    const sx = (hash(t * 91) - .5) * shake, sy = (hash(t * 57) - .5) * shake;
+    const full = measure('PERPLY', 330);
+    txt(letters[i], W / 2 - full / 2 + sx, H / 2 + 115 + sy, { size: 330, color: i === 5 ? C.mint : C.ink, chroma: 26 * Math.exp(-k * 8) + 6 * P(t, 20.4, 20.8), glow: i === 5 ? 40 : 0 });
+  } else if (t < 22.0) {
+    const hits = [[20.8, 'LONG', C.accent], [21.2, 'OR', C.ink], [21.6, 'SHORT?', C.red]];
+    let cur = hits[0]; for (const h of hits) if (t >= h[0]) cur = h;
+    punch(cur[1], W / 2, H / 2, t - cur[0], { size: fit(cur[1], 1500, 420), color: cur[2], from: 0.45, glow: 30, glowColor: cur[2] });
+  } else {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    const q = eInCubic(P(t, 22.0, 22.4));
+    ctx.fillStyle = C.light; ctx.shadowColor = C.mint; ctx.shadowBlur = 30;
+    ctx.fillRect(W / 2 - q * W / 2, H / 2 - 1.5 - q * 2, q * W, 3 + q * 4);
+    ctx.shadowBlur = 0;
+  }
+}
+
+function sDrop2(t) {
+  const k = t - 22.4;
+  bg('rgba(24,150,138,.65)', W * 0.79, H * 0.48);
+  warp(t, 1.4 * Math.exp(-k * 1.2) + 0.2, W * 0.79, H * 0.48);
+  ribbons(t, 0.45, { speed: 2.2 });
+  dust(t, 0.6, 2);
+  rings(t, [22.4], W * 0.79, H * 0.48, { r0: 200, r1: 1500, lw: 30, life: 1.2 });
+  rings(t, KICKS.filter(x => x > 22.4 && x < 25.6), W * 0.79, H * 0.48, { r0: 340, r1: 520, lw: 6, alpha: 0.3, life: 0.4 });
+  burst(t, 22.4, W * 0.79, H * 0.48, { n: 120 });
+  const spin = (1 - eOutExpo(clamp(k / 1.4))) * Math.PI * 6;
+  const pulse = 1 + 0.04 * env(t, KICKS, 12);
+  emblem(W * 0.79, H * 0.48 + Math.sin(t * 2.5) * 12, 640 * pulse * lerp(1.8, 1, eOutExpo(clamp(k / 0.4))), { sx: Math.cos(spin), glow: 50 });
+  eyebrow('PERPLY / ELYSIUM', 110, 250, P(t, 22.5, 22.8));
+  reveal('The memecoin', 110, 430, P(t, 22.4, 22.8), { size: 118 });
+  reveal('perpetual exchange', 110, 580, P(t, 23.2, 23.6), { size: 118 });
+  reveal('on Elysium.', 110, 730, P(t, 24.0, 24.4), { size: 118, color: C.mint, glow: 30 });
+  const tp = P(t, 24.8, 25.1);
+  if (tp > 0) {
+    ctx.save(); ctx.globalAlpha = tp;
+    const tw = measure('PERPETUALS', 20, { mono: true }) + 36;
+    rrect(110, 800, tw, 44, 6, 'rgba(111,230,211,.1)', C.mint, 1.5);
+    txt('PERPETUALS', 128, 829, { size: 20, mono: true, color: C.mint });
+    txt('Long / Short · HYPE margin', 110 + tw + 24, 831, { size: 26, weight: 400, color: C.muted, ls: 0 });
+    ctx.restore();
+  }
+}
+
+function sSite(t) {
+  bg('rgba(18,120,112,.55)', W / 2, H * 0.55);
+  ribbons(t, 0.3, { speed: 1.5, y: H * 0.8 });
+  dust(t, 0.5);
+  const k = t - 25.6;
+  const e = eOutExpo(clamp(k / 0.6));
+  const push = 1 + 0.05 * P(t, 25.6, 27.2) + 0.01 * env(t, KICKS, 12);
+  const dim = t >= 27.2 ? 0.22 : 1;
+  ctx.save();
+  ctx.globalAlpha = dim;
+  ctx.translate(W / 2, H / 2 + 40);
+  ctx.scale(lerp(1.5, 0.82, e) * push, lerp(1.5, 0.82, e) * push);
+  ctx.rotate(lerp(0.12, -0.03, e));
+  if (t >= 27.2) ctx.filter = 'blur(6px)';
+  browser(0, 0, 1700, t, typed('perply.live', P(t, 25.8, 26.5)));
+  ctx.restore();
+  if (t < 27.2) {
+    eyebrow('NOW LIVE', W / 2 - 110, 120, P(t, 25.9, 26.2));
+    return;
+  }
+  const words = [[27.2, 'DISCOVER.'], [27.6, 'TRADE.'], [28.0, 'MANAGE.'], [28.4, 'PERPLY.']];
+  let cur = words[0]; for (const w of words) if (t >= w[0]) cur = w;
+  const kk = t - cur[0];
+  ctx.save();
+  if (t > 28.5) { const q = eInCubic(P(t, 28.5, 28.8)); ctx.translate(W / 2, H / 2); ctx.scale(1 + q * 3, 1 + q * 3); ctx.translate(-W / 2, -H / 2); ctx.globalAlpha = 1 - q; }
+  punch(cur[1], W / 2, H / 2, kk, { size: fit(cur[1], 1600, 360), color: cur[1] === 'PERPLY.' ? C.mint : C.ink, from: 0.3, glow: cur[1] === 'PERPLY.' ? 40 : 0 });
+  ctx.restore();
+  txt('DISCOVER / TRADE / MANAGE', W / 2, H - 110, { size: 24, mono: true, color: C.mint, align: 'center', alpha: t < 28.5 ? 1 : 0 });
+}
+
+function sOutro(t) {
+  const k = t - 28.8;
+  bg('rgba(20,130,122,.55)', W / 2, H * 0.45);
+  emblem(W / 2, H / 2, 1500, { alpha: 0.08, rot: -0.2 + t * 0.03 });
+  ribbons(t, 0.4, { speed: 0.8 });
+  dust(t, 0.5, 0.6);
+  rings(t, [28.8], W / 2, H * 0.42, { r0: 150, r1: 1300, lw: 26, life: 1.4 });
+  burst(t, 28.8, W / 2, H * 0.42, { n: 100 });
+  warp(t, 0.9 * Math.exp(-k * 2), W / 2, H * 0.42);
+  const e = eOutBack(clamp(k / 0.5));
+  const ms = 190, ts = 230;
+  const tw = measure('perply', ts, { ls: -8 });
+  const total = ms + 40 + tw;
+  ctx.save();
+  ctx.translate(W / 2, H * 0.42); ctx.scale(lerp(1.6, 1, e), lerp(1.6, 1, e)); ctx.translate(-W / 2, -H * 0.42);
+  ctx.shadowColor = 'rgba(60,241,215,.6)'; ctx.shadowBlur = 40;
+  mark(W / 2 - total / 2 + ms / 2, H * 0.42 - 10, ms);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(W / 2, H * 0.42); ctx.scale(lerp(1.6, 1, e), lerp(1.6, 1, e)); ctx.translate(-W / 2, -H * 0.42);
+  txt('perply', W / 2 - total / 2 + ms + 40, H * 0.42 + 70, { size: ts, ls: -8, chroma: 16 * Math.exp(-k * 6), glow: 20, glowColor: 'rgba(111,230,211,.4)' });
+  ctx.restore();
+  reveal('Memecoin perpetuals on Elysium.', W / 2, 700, P(t, 29.5, 29.9), { size: 54, align: 'center', color: C.light });
+  const cp = eOutExpo(P(t, 30.1, 30.6));
+  if (cp > 0) {
+    ctx.save();
+    ctx.globalAlpha = cp;
+    ctx.translate(0, (1 - cp) * 40);
+    const bw = 330, bh = 78, gap = 24;
+    const uw = measure('perply.live', 30, { mono: true, ls: 1 }) + 70;
+    const x0 = W / 2 - (bw + gap + uw) / 2;
+    ctx.shadowColor = 'rgba(111,230,211,.7)'; ctx.shadowBlur = 30 + 20 * Math.sin(t * 5);
+    rrect(x0, 790, bw, bh, 14, C.mint);
+    ctx.shadowBlur = 0;
+    txt('Explore markets  →', x0 + bw / 2, 840, { size: 28, color: C.dark, align: 'center', ls: 0 });
+    rrect(x0 + bw + gap, 790, uw, bh, 14, 'rgba(6,26,31,.8)', C.line, 2);
+    txt('perply.live', x0 + bw + gap + uw / 2, 840, { size: 30, mono: true, color: C.ink, align: 'center', ls: 1, weight: 400 });
+    ctx.restore();
+  }
+  txt('Perpetuals use leverage and carry risk. Trade responsibly.', W / 2, H - 50, { size: 19, weight: 400, color: C.muted, align: 'center', ls: 0, alpha: 0.75 * P(t, 30.8, 31.3) });
+}
+
+// ------------------------------------------------------------------ frame
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  // global camera shake on hits
+  const big = env(t, BIG, 7);
+  const med = env(t, [...INTRO_HITS, 4.8, 6.4, 8.0, 8.4, 9.6, 10.0, 14.4, ...MONTAGE, ...STUTTER, 20.8, 21.2, 21.6, 25.6, 27.2, 27.6, 28.0, 28.4], 14);
+  const sh = big * 30 + med * 10;
+  ctx.save();
+  ctx.translate((hash(t * 133) - .5) * sh, (hash(t * 171) - .5) * sh);
+  const zk = 1 + 0.01 * env(t, KICKS, 14);
+  ctx.translate(W / 2, H / 2); ctx.scale(zk, zk); ctx.translate(-W / 2, -H / 2);
+
+  if (t < 3.2) sIntro(t);
+  else if (t < 4.8) sDrop1(t);
+  else if (t < 6.4) sLong(t, false);
+  else if (t < 8.0) sLong(t, true);
+  else if (t < 9.6) sHype(t);
+  else if (t < 16.0) sTerminal(t);
+  else if (t < 19.2) sMontage(t);
+  else if (t < 22.4) sBuild(t);
+  else if (t < 25.6) sDrop2(t);
+  else if (t < 28.8) sSite(t);
+  else sOutro(t);
+  ctx.restore();
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.filter = 'none';
+  // glitch slices right after the big drops
+  for (const g of [3.2, 9.6, 16.0, 21.6, 22.4, 25.6, 28.8]) {
+    const k = t - g;
+    if (k >= 0 && k < 0.16) {
+      for (let s = 0; s < 9; s++) {
+        const y = Math.floor(hash(s * 7 + g * 3 + Math.floor(k * 30)) * H);
+        const h = 10 + Math.floor(hash(s * 11 + g) * 70);
+        const dx = (hash(s * 13 + Math.floor(k * 30)) - .5) * 160 * (1 - k / 0.16);
+        ctx.drawImage(cv, 0, y, W, h, dx, y, W, h);
+      }
+    }
+  }
+  // flashes
+  const fl = Math.max(
+    env(t, BIG, 9) * 0.85,
+    env(t, INTRO_HITS, 14) * 0.35,
+    env(t, [4.8, 6.4, 8.0, 9.6, 14.4, 16.0, 20.8, 21.2, 21.6, 25.6], 12) * 0.45,
+    env(t, [...MONTAGE.slice(1), ...STUTTER, 27.2, 27.6, 28.0, 28.4], 16) * 0.22
+  );
+  if (fl > 0.005) {
+    ctx.fillStyle = `rgba(225,255,248,${fl})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  // vignette
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 1.05);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  // grain
+  ctx.save();
+  ctx.globalAlpha = 0.05;
+  ctx.globalCompositeOperation = 'overlay';
+  const ox = Math.floor(hash(Math.floor(t * 30)) * 384), oy = Math.floor(hash(Math.floor(t * 30) + 0.5) * 384);
+  for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+  // fade in / out
+  const fade = Math.max(1 - P(t, 0, 0.25), P(t, 32.2, 33.4));
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+window.render = render;
+window.DUR = DUR;
+</script>
+</body>
+</html>
