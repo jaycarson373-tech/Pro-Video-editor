@@ -1,0 +1,853 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Perps Pad hype scene</title>
+<style>
+  @font-face { font-family: 'DM Sans'; src: url(assets/fonts/dm-sans-bold.ttf); font-weight: 700; }
+  @font-face { font-family: 'DM Sans'; src: url(assets/fonts/dm-sans-regular.ttf); font-weight: 400; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// Deterministic, time-driven scene: render(t) draws the frame at t seconds.
+// Beat grid: 150 BPM -> beat 0.4 s, bar 1.6 s (matches music.py).
+const W = 1920, H = 1080, B = 0.4, DUR = 23.0;
+// Perps Pad brand tokens (from pad.css)
+const C = {
+  bg: '#061b1e', panel: '#0b2529', raised: '#0f2d31', line: '#203c3e', ink: '#eef8f4',
+  muted: '#9ab4b4', mint: '#98f4ce', light: '#c4fbe4', teal: '#19d6bd', short: '#f1b3b7',
+  red: '#f1b3b7', accent: '#98f4ce', dark: '#03100f'
+};
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+// ------------------------------------------------------------------ utils
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eOutExpo = x => x >= 1 ? 1 : 1 - Math.pow(2, -10 * x);
+const eOutCubic = x => 1 - Math.pow(1 - x, 3);
+const eInCubic = x => x * x * x;
+const eInOut = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const eOutBack = x => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+function env(t, times, decay) {
+  let v = 0;
+  for (const ti of times) if (t >= ti - 1e-6) v = Math.max(v, Math.exp(-(t - ti) * decay));
+  return v;
+}
+function lastHit(t, times) { let r = null; for (const ti of times) if (t >= ti - 1e-6) r = ti; return r; }
+const range = (a, b, step) => { const r = []; for (let x = a; x < b - 1e-6; x += step) r.push(+x.toFixed(3)); return r; };
+
+
+function font(size, o = {}) {
+  return o.mono ? `${o.weight || 700} ${size}px "JetBrains Mono"` : `${o.weight || 700} ${size}px "DM Sans"`;
+}
+function setFont(size, o = {}) {
+  ctx.font = font(size, o);
+  ctx.letterSpacing = (o.ls != null ? o.ls : (o.mono ? size * 0.14 : -size * 0.045)) + 'px';
+}
+function measure(s, size, o = {}) {
+  ctx.save(); setFont(size, o); const w = ctx.measureText(s).width; ctx.restore(); return w;
+}
+function fit(s, maxW, maxSize, o = {}) { return Math.min(maxSize, maxW / measure(s, 100, o) * 100); }
+
+function txt(s, x, y, o = {}) {
+  const size = o.size || 100;
+  ctx.save();
+  setFont(size, o);
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = o.base || 'alphabetic';
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  if (o.chroma && o.chroma > 0.3) {
+    const d = o.chroma;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255,70,130,.6)'; ctx.fillText(s, x - d, y);
+    ctx.fillStyle = 'rgba(40,210,255,.6)'; ctx.fillText(s, x + d, y);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  if (o.glow) { ctx.shadowColor = o.glowColor || 'rgba(111,230,211,.8)'; ctx.shadowBlur = o.glow; }
+  ctx.fillStyle = o.color || C.ink;
+  if (o.stroke) { ctx.strokeStyle = o.color || C.ink; ctx.lineWidth = o.stroke; ctx.strokeText(s, x, y); }
+  else ctx.fillText(s, x, y);
+  ctx.restore();
+}
+
+// text that slides up out of a mask
+function reveal(s, x, y, p, o = {}) {
+  if (p <= 0) return;
+  const size = o.size || 100;
+  const w = measure(s, size, o);
+  const al = o.align || 'left';
+  const x0 = al === 'left' ? x : al === 'center' ? x - w / 2 : x - w;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x0 - 40, y - size * 1.05, w + 80, size * 1.4);
+  ctx.clip();
+  txt(s, x, y + (1 - eOutExpo(p)) * size * 1.2, o);
+  ctx.restore();
+}
+
+// word that punches in on a hit
+function punch(s, x, y, k, o = {}) {
+  const sc = (o.base || 1) * (1 + (o.from ?? 0.3) * Math.exp(-k * 16)) * (1 + (o.drift ?? 0.04) * k);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(sc, sc);
+  txt(s, 0, 0, { ...o, align: o.align || 'center', base: 'middle', chroma: (o.chroma ?? 22) * Math.exp(-k * 9) });
+  ctx.restore();
+}
+
+function rrect(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+
+// ------------------------------------------------------------------ layers
+function bg(tint = 'rgba(18,110,104,0.55)', cx = W * 0.62, cy = H * 0.45, base = C.bg) {
+  ctx.fillStyle = base; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, W * 0.75);
+  g.addColorStop(0, tint); g.addColorStop(1, 'rgba(4,24,28,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+
+function ribbons(t, alpha, o = {}) {
+  if (alpha <= 0) return;
+  const lg = ctx.createLinearGradient(0, 0, W, 0);
+  const col = o.rgb || '87,249,219';
+  lg.addColorStop(0, `rgba(${col},0)`); lg.addColorStop(.5, `rgba(${col},.65)`); lg.addColorStop(1, `rgba(${col},0)`);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = lg;
+  ctx.lineWidth = o.lw || 1.6;
+  const sp = o.speed || 1, yb = o.y ?? H * 0.66, amp = o.amp || 1;
+  for (let r = 0; r < 8; r++) {
+    ctx.beginPath();
+    for (let x = -60; x <= W + 60; x += 16) {
+      const y = yb + r * 15 + amp * (Math.sin(x * 0.0031 + t * 0.9 * sp + r * 0.1) * 150 + Math.sin(x * 0.0012 - t * 0.45 * sp) * 95);
+      x === -60 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function dust(t, alpha, speed = 1, color = '111,230,211') {
+  if (alpha <= 0) return;
+  ctx.save();
+  for (let i = 0; i < 110; i++) {
+    const x = ((hash(i) * W + t * 18 * (0.3 + hash(i + 9)) * speed) % W + W) % W;
+    const y = ((hash(i + 3) * H - t * (25 + 55 * hash(i + 5)) * speed) % H + H) % H;
+    const r = 0.8 + hash(i + 7) * 2.2;
+    ctx.globalAlpha = alpha * (0.25 + 0.75 * hash(i + 11)) * (0.6 + 0.4 * Math.sin(t * 3 + i));
+    ctx.fillStyle = `rgb(${color})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function warp(t, k, cx = W / 2, cy = H / 2, color = C.light) {
+  if (k <= 0.01) return;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineCap = 'round';
+  for (let i = 0; i < 150; i++) {
+    const a = hash(i) * Math.PI * 2;
+    const sp = 0.5 + hash(i + 1) * 1.3;
+    const d = (hash(i + 2) + t * sp * 1.3) % 1;
+    const r0 = 60 + d * d * 1500;
+    const len = (20 + d * 300) * k;
+    ctx.globalAlpha = clamp(d * 1.6) * 0.55 * k;
+    ctx.lineWidth = 1 + d * 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * (r0 + len), cy + Math.sin(a) * (r0 + len));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function rings(t, times, cx, cy, o = {}) {
+  for (const t0 of times) {
+    const k = t - t0;
+    const life = o.life || 1.2;
+    if (k < 0 || k > life) continue;
+    const p = eOutCubic(k / life);
+    ctx.save();
+    ctx.globalAlpha = (1 - p) * (o.alpha ?? 0.9);
+    ctx.strokeStyle = o.color || C.mint;
+    ctx.lineWidth = (o.lw || 12) * (1 - p) + 1;
+    ctx.beginPath(); ctx.arc(cx, cy, (o.r0 || 120) + p * (o.r1 || 1100), 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function burst(t, t0, cx, cy, o = {}) {
+  const k = t - t0;
+  if (k < 0 || k > 1.6) return;
+  ctx.save();
+  for (let i = 0; i < (o.n || 70); i++) {
+    const a = hash(i + t0 * 13) * Math.PI * 2;
+    const sp = 400 + hash(i + 5 + t0) * 1300;
+    const d = sp * (1 - Math.exp(-k * 3.2)) / 3.2 * 3;
+    const r = (2 + hash(i + 2) * 5) * (1 - k / 1.6);
+    ctx.globalAlpha = (1 - k / 1.6) * 0.9;
+    ctx.fillStyle = hash(i + 4) > 0.75 ? C.ink : C.mint;
+    ctx.beginPath(); ctx.arc(cx + Math.cos(a) * d, cy + Math.sin(a) * d, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// price-ish line, purely illustrative
+function chart(x0, y0, w, h, prog, color, seed, dir, o = {}) {
+  if (prog <= 0) return;
+  const n = 140, pts = [];
+  for (let i = 0; i <= n * prog; i++) {
+    const u = i / n;
+    let v = dir * (Math.pow(u, 1.7) * 1.6 - 0.8);
+    v += 0.09 * Math.sin(u * 21 + seed) + 0.05 * Math.sin(u * 63 + seed * 2) + 0.03 * (hash(i + seed) - .5);
+    pts.push([x0 + u * w, y0 + h / 2 - v * h / 2]);
+  }
+  ctx.save();
+  // area
+  const g = ctx.createLinearGradient(0, y0, 0, y0 + h);
+  g.addColorStop(0, o.fill || 'rgba(111,230,211,.28)'); g.addColorStop(1, 'rgba(111,230,211,0)');
+  ctx.beginPath(); ctx.moveTo(pts[0][0], y0 + h);
+  pts.forEach(p => ctx.lineTo(p[0], p[1]));
+  ctx.lineTo(pts[pts.length - 1][0], y0 + h); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
+  // line
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.strokeStyle = color; ctx.lineWidth = o.lw || 6; ctx.lineJoin = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = o.blur ?? 24;
+  ctx.stroke();
+  const hd = pts[pts.length - 1];
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(hd[0], hd[1], (o.lw || 6) * 1.8, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 0.35;
+  ctx.beginPath(); ctx.arc(hd[0], hd[1], (o.lw || 6) * 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function arrow(cx, cy, size, dir, color, alpha = 1) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(dir > 0 ? -Math.PI / 4 : Math.PI / 4);
+  ctx.globalAlpha *= alpha;
+  ctx.strokeStyle = color; ctx.lineWidth = size * 0.13; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = 30;
+  ctx.beginPath();
+  ctx.moveTo(-size / 2, 0); ctx.lineTo(size / 2, 0);
+  ctx.moveTo(size / 2 - size * 0.32, -size * 0.32); ctx.lineTo(size / 2, 0); ctx.lineTo(size / 2 - size * 0.32, size * 0.32);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function eyebrow(s, x, y, alpha = 1, color = C.mint, line = true) {
+  if (line) { ctx.save(); ctx.globalAlpha *= alpha; ctx.fillStyle = color; ctx.fillRect(x, y - 8, 40, 3); ctx.restore(); }
+  txt(s, x + (line ? 58 : 0), y, { size: 22, mono: true, color, alpha });
+}
+
+function typed(s, p) { return s.slice(0, Math.floor(s.length * clamp(p) + 1e-6)); }
+
+
+// ------------------------------------------------------------------ timing (150 BPM, matches music.py)
+const KICKS = [...range(3.2, 14.4, B), 14.4, 14.8, 15.0, 15.2, 15.4, ...range(16.0, 19.2, B), 19.2];
+const INTRO_HITS = [0.8, 1.6, 2.0, 2.2, 2.4];
+const MONTAGE = range(12.8, 14.4, B);
+const STUTTER = [14.4, 14.8, 15.0, 15.2, 15.4];
+const BIG = [3.2, 16.0, 19.2];
+const MED = [...INTRO_HITS, 4.8, 6.4, 8.0, 8.4, 8.8, 9.2, 9.6, 10.4, 11.2, 12.0, ...MONTAGE, ...STUTTER, 17.6];
+
+// ------------------------------------------------------------------ assets
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; }); }
+let ICON, SITE, LAUNCH, GRAIN;
+window.ready = (async () => {
+  [ICON, SITE, LAUNCH] = await Promise.all([
+    loadImg('assets/brand/perps-pad.jpg'),
+    loadImg('assets/site-hero.png'),
+    loadImg('assets/site-launch.png'),
+  ]);
+  await Promise.all([
+    document.fonts.load('700 100px "DM Sans"'),
+    document.fonts.load('400 40px "DM Sans"'),
+    document.fonts.load('700 40px "JetBrains Mono"'),
+    document.fonts.load('400 40px "JetBrains Mono"'),
+  ]);
+  GRAIN = document.createElement('canvas');
+  GRAIN.width = GRAIN.height = 384;
+  const g = GRAIN.getContext('2d');
+  const id = g.createImageData(384, 384);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.floor(hash(i * 0.37) * 255);
+    id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255;
+  }
+  g.putImageData(id, 0, 0);
+  return true;
+})();
+
+// app-icon tile with the glowing P
+function icon(cx, cy, size, o = {}) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(o.rot || 0);
+  ctx.scale(o.sx ?? 1, 1);
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  const r = size * 0.22;
+  if (o.glow) {
+    ctx.shadowColor = 'rgba(25,214,189,.8)'; ctx.shadowBlur = o.glow;
+    rrect(-size / 2, -size / 2, size, size, r, '#0b3b3d');
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  }
+  ctx.beginPath(); ctx.roundRect(-size / 2, -size / 2, size, size, r); ctx.clip();
+  ctx.drawImage(ICON, -size / 2, -size / 2, size, size);
+  // glass sheen
+  const g = ctx.createLinearGradient(-size / 2, -size / 2, size / 2, size / 2);
+  g.addColorStop(0, 'rgba(255,255,255,.16)'); g.addColorStop(0.45, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.fillRect(-size / 2, -size / 2, size, size);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(o.rot || 0); ctx.scale(o.sx ?? 1, 1);
+  ctx.globalAlpha *= (o.alpha ?? 1) * 0.7;
+  rrect(-size / 2, -size / 2, size, size, r, null, 'rgba(152,244,206,.55)', Math.max(1.5, size * 0.008));
+  ctx.restore();
+}
+
+// "perps" + mint "pad" wordmark, left-aligned at x
+function wordmark(x, y, size, o = {}) {
+  const w1 = measure('perps', size, { ls: -size * 0.04 });
+  txt('perps', x, y, { size, ls: -size * 0.04, chroma: o.chroma, glow: o.glow, glowColor: 'rgba(152,244,206,.35)' });
+  txt('pad', x + w1, y, { size, ls: -size * 0.04, color: C.mint, chroma: o.chroma, glow: o.glow });
+  return w1 + measure('pad', size, { ls: -size * 0.04 });
+}
+
+function tickerChip(cx, cy, size, alpha = 1, k = 9) {
+  const w = measure('$PERPS', size, { mono: true }) + size * 1.4;
+  const h = size * 2.1;
+  const s = 1 + 0.35 * Math.exp(-k * 14);
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.translate(cx, cy); ctx.scale(s, s);
+  ctx.shadowColor = 'rgba(152,244,206,.7)'; ctx.shadowBlur = 30;
+  rrect(-w / 2, -h / 2, w, h, h / 2, 'rgba(152,244,206,.12)', C.mint, Math.max(2, size * 0.09));
+  ctx.shadowBlur = 0;
+  txt('$PERPS', 0, size * 0.36, { size, mono: true, color: C.mint, align: 'center' });
+  ctx.restore();
+}
+
+function assetTile(cx, cy, size, label, rot, k, color = C.mint) {
+  const s = 1 + 0.4 * Math.exp(-k * 14);
+  ctx.save();
+  ctx.translate(cx, cy); ctx.rotate(rot); ctx.scale(s, s);
+  ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 20;
+  rrect(-size / 2, -size / 2, size, size, size * 0.16, '#0f3134');
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  const g = ctx.createLinearGradient(0, -size / 2, 0, size / 2);
+  g.addColorStop(0, 'rgba(152,244,206,.18)'); g.addColorStop(1, 'rgba(152,244,206,0)');
+  rrect(-size / 2, -size / 2, size, size, size * 0.16, g, color, 3);
+  txt(label, 0, size * 0.1, { size: size * 0.26, align: 'center', color: C.ink });
+  ctx.restore();
+}
+
+// strategy leg card (site's engine diagram)
+function legCard(x, y, w, h, o) {
+  const col = o.dir === 'LONG' ? C.mint : C.short;
+  ctx.save();
+  ctx.globalAlpha *= o.alpha;
+  ctx.translate(x + w / 2, y + h / 2);
+  const s = 1 + 0.15 * (o.pop || 0);
+  ctx.scale(s, s);
+  ctx.translate(-w / 2, -h / 2);
+  ctx.shadowColor = 'rgba(0,0,0,.5)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
+  rrect(0, 0, w, h, 18, C.panel);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  rrect(0, 0, w, h, 18, null, o.pop > 0.05 ? col : C.line, 2 + 3 * (o.pop || 0));
+  ctx.beginPath(); ctx.arc(46, 50, 22, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(152,244,206,.1)'; ctx.fill(); ctx.strokeStyle = C.mint; ctx.lineWidth = 2; ctx.stroke();
+  txt(o.asset[0], 46, 59, { size: 24, align: 'center', color: C.mint, ls: 0 });
+  txt(o.asset, 84, 60, { size: 30, ls: 0 });
+  txt(o.dir, w - 28, 58, { size: 18, mono: true, color: col, align: 'right' });
+  txt(o.lev, 28, 112, { size: 20, weight: 400, color: C.muted, ls: 0 });
+  txt(o.alloc, w - 28, 112, { size: 20, weight: 400, color: C.muted, align: 'right', ls: 0 });
+  chart(28, 128, w - 56, h - 150, o.chartP, col, o.dir === 'LONG' ? 2 : 5, o.dir === 'LONG' ? 1 : -1, { lw: 3.5, blur: 12, fill: o.dir === 'LONG' ? 'rgba(152,244,206,.18)' : 'rgba(241,179,183,.15)' });
+  ctx.restore();
+}
+
+// particles flowing along a polyline
+function flow(t, pts, n, speed, color, alpha, size = 5) {
+  if (alpha <= 0) return;
+  const segs = []; let total = 0;
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segs.push(d); total += d; }
+  ctx.save();
+  ctx.fillStyle = color; ctx.shadowColor = color; ctx.shadowBlur = 14;
+  for (let j = 0; j < n; j++) {
+    let d = ((j / n + t * speed) % 1) * total;
+    let i = 0; while (i < segs.length - 1 && d > segs[i]) { d -= segs[i]; i++; }
+    const u = d / segs[i];
+    const x = lerp(pts[i][0], pts[i + 1][0], u), y = lerp(pts[i][1], pts[i + 1][1], u);
+    ctx.globalAlpha = alpha;
+    ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function path(pts, p, color, lw = 3, alpha = 1) {
+  if (p <= 0) return;
+  let total = 0; const segs = [];
+  for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segs.push(d); total += d; }
+  let left = total * clamp(p);
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 0; i < segs.length && left > 0; i++) {
+    const u = Math.min(1, left / segs[i]);
+    ctx.lineTo(lerp(pts[i][0], pts[i + 1][0], u), lerp(pts[i][1], pts[i + 1][1], u));
+    left -= segs[i];
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function browser(x, y, w, img, t, url, crop) {
+  const ih = w * crop[3] / crop[2], bh = 58;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.shadowColor = 'rgba(25,214,189,.45)'; ctx.shadowBlur = 80;
+  rrect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18, C.raised);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.save();
+  ctx.beginPath(); ctx.roundRect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18); ctx.clip();
+  ctx.drawImage(img, crop[0], crop[1], crop[2], crop[3], -w / 2, -(ih + bh) / 2 + bh, w, ih);
+  ctx.restore();
+  rrect(-w / 2, -(ih + bh) / 2, w, ih + bh, 18, null, 'rgba(152,244,206,.55)', 2);
+  const ty = -(ih + bh) / 2 + bh / 2;
+  ['#f1b3b7', '#f1c97a', '#98f4ce'].forEach((c, i) => { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(-w / 2 + 30 + i * 24, ty, 7, 0, Math.PI * 2); ctx.fill(); });
+  rrect(-300, ty - 18, 600, 36, 18, '#061a1f', C.line, 1.5);
+  ctx.strokeStyle = C.mint; ctx.lineWidth = 2.2;
+  ctx.strokeRect(-276, ty - 4, 14, 11);
+  ctx.beginPath(); ctx.arc(-269, ty - 4, 5, Math.PI, 0); ctx.stroke();
+  txt(url, -246, ty + 7, { size: 19, mono: true, weight: 400, color: C.ink, ls: 0.5 });
+  if (Math.floor(t * 4) % 2 === 0) {
+    const uw = measure(url, 19, { mono: true, weight: 400, ls: 0.5 });
+    ctx.fillStyle = C.mint; ctx.fillRect(-244 + uw, ty - 10, 2, 20);
+  }
+  ctx.restore();
+  return { top: -(ih + bh) / 2 + bh, scale: w / crop[2], crop };
+}
+
+// ------------------------------------------------------------------ scenes
+function sIntro(t) {
+  bg('rgba(25,140,125,' + (0.15 + 0.3 * P(t, 0, 2.8)) + ')', W / 2, H / 2);
+  ribbons(t, 0.35 * P(t, 0, 1.2), { speed: 1.6, rgb: '25,214,189' });
+  dust(t, 0.6 * P(t, 0, 1), 1, '152,244,206');
+  if (t < 0.8) {
+    const s = typed('PERP-BACKED COINS / ELYSIUM', P(t, 0.05, 0.65));
+    const w = measure('PERP-BACKED COINS / ELYSIUM', 30, { mono: true });
+    txt(s, W / 2 - w / 2, H / 2 + 10, { size: 30, mono: true, color: C.mint });
+    if (Math.floor(t * 6) % 2 === 0) {
+      const sw = measure(s, 30, { mono: true });
+      ctx.fillStyle = C.mint; ctx.fillRect(W / 2 - w / 2 + sw + 4, H / 2 - 16, 14, 30);
+    }
+    return;
+  }
+  const words = [[0.8, 'LAUNCH', C.ink], [1.6, 'A COIN.', C.ink], [2.0, 'GIVE', C.ink], [2.2, 'IT', C.ink], [2.4, 'A STRATEGY.', C.mint]];
+  let cur = words[0];
+  for (const w of words) if (t >= w[0]) cur = w;
+  const size = fit(cur[1], 1650, 330);
+  ctx.save();
+  if (t > 2.8) {
+    const q = eInCubic(P(t, 2.8, 3.2));
+    ctx.translate(W / 2, H / 2); ctx.scale(1 + q * 6, 1 + q * 6); ctx.translate(-W / 2, -H / 2);
+    ctx.globalAlpha = 1 - q;
+  }
+  punch(cur[1], W / 2, H / 2, t - cur[0], { size, color: cur[2], from: 0.35, glow: cur[2] === C.mint ? 40 : 0, glowColor: 'rgba(152,244,206,.7)' });
+  ctx.restore();
+}
+
+function sDrop1(t) {
+  const k = t - 3.2;
+  const cy = H * 0.4;
+  bg('rgba(25,170,150,.6)', W / 2, cy);
+  warp(t, 1.2 * Math.exp(-k * 1.3) + 0.25, W / 2, cy, C.mint);
+  ribbons(t, 0.4, { speed: 2.5, rgb: '25,214,189' });
+  rings(t, [3.2], W / 2, cy, { r0: 200, r1: 1300, lw: 26, life: 1.1, color: C.mint });
+  rings(t, KICKS.filter(x => x > 3.2 && x < 4.8), W / 2, cy, { r0: 260, r1: 460, lw: 6, alpha: 0.35, life: 0.4, color: C.teal });
+  burst(t, 3.2, W / 2, cy, { n: 90 });
+  const s = lerp(3.4, 1, eOutExpo(clamp(k / 0.35)));
+  const pulse = 1 + 0.045 * env(t, KICKS, 12);
+  icon(W / 2, cy + Math.sin(t * 3) * 6, 380 * s * pulse, { rot: (1 - eOutExpo(clamp(k / 0.4))) * -0.7, glow: 70 });
+  if (t >= 3.6) {
+    const n = clamp(Math.floor((t - 3.6) / (B / 4)) + 1, 0, 8);
+    const full = 'perpspad';
+    const ws = 150;
+    const total = measure('perps', ws, { ls: -6 }) + measure('pad', ws, { ls: -6 });
+    const part = full.slice(0, n);
+    const x0 = W / 2 - total / 2;
+    const ch = 12 * env(t, range(3.6, 4.4, B / 4), 14);
+    if (n <= 5) txt(part, x0, H * 0.83, { size: ws, ls: -6, chroma: ch });
+    else wordmark(x0, H * 0.83, ws, { chroma: ch, glow: 20 });
+  }
+  txt('ON ELYSIUM', W / 2, H * 0.92, { size: 24, mono: true, color: C.mint, align: 'center', alpha: P(t, 4.2, 4.4) });
+  if (t >= 4.4) tickerChip(W / 2 + 470, H * 0.79, 30, 1, t - 4.4);
+}
+
+function sLongShort(t, short) {
+  const t0 = short ? 6.4 : 4.8, k = t - t0;
+  const col = short ? C.short : C.mint;
+  bg(short ? 'rgba(120,45,60,.55)' : 'rgba(25,170,150,.6)', short ? W * 0.25 : W * 0.75, short ? H * 0.75 : H * 0.3);
+  ribbons(t, 0.22, { speed: 3, rgb: short ? '241,179,183' : '152,244,206', y: H * 0.5 });
+  dust(t, 0.6, 3, short ? '241,179,183' : '152,244,206');
+  ctx.save(); ctx.strokeStyle = 'rgba(154,180,180,.07)'; ctx.lineWidth = 1;
+  const off = ((t * 120) % 120) * (short ? -1 : 1);
+  for (let x = -120; x < W + 120; x += 120) { ctx.beginPath(); ctx.moveTo(x + off, 0); ctx.lineTo(x + off, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 120) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  ctx.restore();
+  chart(-40, 120, W + 80, 840, eOutCubic(P(t, t0, t0 + 1.2)), col, short ? 7 : 1, short ? -1 : 1, { lw: 9, blur: 40, fill: short ? 'rgba(241,179,183,.2)' : 'rgba(152,244,206,.22)' });
+  const asset = short ? 'BTC.' : 'HYPE.';
+  const dir = short ? 'SHORT' : 'LONG';
+  const x = short ? W - 130 : 130, al = short ? 'right' : 'left';
+  const y1 = short ? 330 : 690, y2 = y1 + 250;
+  ctx.save();
+  const sc = 1 + 0.2 * Math.exp(-k * 14);
+  ctx.translate(x, y1); ctx.scale(sc, sc); ctx.translate(-x, -y1);
+  reveal(dir, x, y1, P(t, t0, t0 + 0.3), { size: 250, color: col, align: al, chroma: 18 * Math.exp(-k * 8), glow: 30, glowColor: col });
+  ctx.restore();
+  if (t >= t0 + 0.4) punch(asset, x + (short ? -measure(asset, 250) / 2 : measure(asset, 250) / 2), y2 - 85, t - t0 - 0.4, { size: 250, from: 0.3 });
+  const aw = measure(dir, 250);
+  arrow(short ? x - aw - 130 : x + aw + 130, y1 - 90, 150 * (1 + 0.2 * env(t, [t0 + 0.4, t0 + 0.8, t0 + 1.2], 10)), short ? -1 : 1, col, P(t, t0 + 0.2, t0 + 0.4));
+  const lbl = short ? 'LEG 02 / SHORT / 2× LEVERAGE' : 'LEG 01 / LONG / 3× LEVERAGE';
+  txt(typed(lbl, P(t, t0 + 0.8, t0 + 1.3)), x, short ? y1 - 250 : y1 - 250, { size: 26, mono: true, color: col, align: al });
+}
+
+function sMix(t) {
+  const t0 = 8.0;
+  bg('rgba(25,160,140,.55)', W / 2, H * 0.62);
+  ribbons(t, 0.3, { speed: 2, rgb: '25,214,189' });
+  dust(t, 0.5, 1.5, '152,244,206');
+  const zoom = 1 + 0.04 * (t - t0) + (t > 9.3 ? eInCubic(P(t, 9.3, 9.6)) * 0.5 : 0);
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(zoom, zoom); ctx.translate(-W / 2, -H / 2);
+  ctx.globalAlpha = 1 - P(t, 9.42, 9.6);
+  txt('OR', W / 2, 190, { size: 40, mono: true, color: C.mint, align: 'center', alpha: P(t, 8.0, 8.1) });
+  punch('BUILD YOUR', W / 2, 330, t - 8.0, { size: 170, from: 0.3 });
+  if (t >= 8.4) punch('OWN MIX.', W / 2, 510, t - 8.4, { size: 190, color: C.mint, from: 0.3, glow: 30, glowColor: 'rgba(152,244,206,.7)' });
+  const tiles = [[8.4, 'HYPE', -0.14, W / 2 - 300], [8.8, 'ETH', 0.02, W / 2], [9.2, 'SOL', 0.12, W / 2 + 300]];
+  for (const [ti, l, r, x] of tiles) {
+    if (t < ti) continue;
+    const e = eOutBack(clamp((t - ti) / 0.3));
+    assetTile(x, lerp(1200, 790, e) + Math.sin(t * 3 + x) * 8, 230, l, r + Math.sin(t * 2 + x) * 0.03, t - ti);
+  }
+  ctx.restore();
+}
+
+function sEngine(t) {
+  bg('rgba(25,140,125,.5)', W * 0.62, H * 0.5);
+  dust(t, 0.4, 1, '152,244,206');
+  const zoom = 1 + 0.035 * P(t, 9.6, 12.8) + 0.008 * env(t, KICKS, 12);
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(zoom, zoom); ctx.translate(-W / 2, -H / 2);
+  // engine frame (mirrors the site's hero diagram)
+  const fx = 760, fy = 150, fw = 1060, fh = 780;
+  const fe = eOutExpo(P(t, 9.6, 10.1));
+  ctx.save();
+  ctx.globalAlpha = fe;
+  ctx.translate(0, (1 - fe) * 80);
+  rrect(fx, fy, fw, fh, 26, 'rgba(11,37,41,.82)', C.line, 2);
+  ctx.save(); ctx.beginPath(); ctx.roundRect(fx, fy, fw, fh, 26); ctx.clip();
+  ctx.strokeStyle = 'rgba(32,60,62,.5)'; ctx.lineWidth = 1;
+  for (let x = fx; x < fx + fw; x += 44) { ctx.beginPath(); ctx.moveTo(x, fy); ctx.lineTo(x, fy + fh); ctx.stroke(); }
+  for (let y = fy; y < fy + fh; y += 44) { ctx.beginPath(); ctx.moveTo(fx, y); ctx.lineTo(fx + fw, y); ctx.stroke(); }
+  ctx.restore();
+  txt('THE PERPS PAD ENGINE', fx + 40, fy + 56, { size: 18, mono: true, color: C.muted });
+  rrect(fx + fw - 250, fy + 30, 210, 38, 6, null, C.line, 1.5);
+  txt('EXAMPLE STRATEGY', fx + fw - 145, fy + 55, { size: 15, mono: true, color: C.muted, align: 'center' });
+  ['ELYSIUM', 'PERPETUAL STRATEGIES', 'HYPERLIQUID'].forEach((s, i) => txt(s, fx + 40 + i * (fw - 80) / 2, fy + fh - 34, { size: 15, mono: true, color: C.muted, align: ['left', 'center', 'right'][i] }));
+  // nodes
+  const coin = [fx + 210, fy + 330];
+  const legA = [fx + 560, fy + 120, 440, 220], legB = [fx + 560, fy + 400, 440, 220];
+  const buy = [fx + 120, fy + 560, 280, 90];
+  const pA = [[coin[0] + 90, coin[1]], [fx + 420, coin[1]], [fx + 420, legA[1] + 110], [legA[0], legA[1] + 110]];
+  const pB = [[coin[0] + 90, coin[1]], [fx + 420, coin[1]], [fx + 420, legB[1] + 110], [legB[0], legB[1] + 110]];
+  const pR = [[legB[0] + legB[2] / 2, legB[1] + legB[3]], [legB[0] + legB[2] / 2, buy[1] + 45], [buy[0] + buy[2], buy[1] + 45]];
+  const pBack = [[buy[0] + buy[2] / 2, buy[1]], [buy[0] + buy[2] / 2, coin[1] + 130]];
+  path(pA, P(t, 10.0, 10.4), C.teal, 3);
+  path(pB, P(t, 10.1, 10.5), C.teal, 3);
+  path(pR, P(t, 11.2, 11.6), C.mint, 3);
+  path(pBack, P(t, 11.5, 11.8), C.mint, 3);
+  flow(t, pA, 6, 0.9, C.mint, P(t, 10.4, 10.6));
+  flow(t, pB, 6, 0.9, C.mint, P(t, 10.5, 10.7));
+  flow(t, pR, 5, 0.8, C.light, P(t, 11.6, 11.8));
+  flow(t, pBack, 3, 0.8, C.light, P(t, 11.8, 12.0));
+  const ce = eOutBack(clamp((t - 9.7) / 0.4));
+  icon(coin[0], coin[1], 170 * ce * (1 + 0.05 * env(t, KICKS, 12)), { glow: 40 });
+  txt('YOUR COIN', coin[0], coin[1] + 128, { size: 18, mono: true, color: C.ink, align: 'center', alpha: ce });
+  txt('Trading fees', coin[0], coin[1] + 158, { size: 20, weight: 400, color: C.muted, align: 'center', ls: 0, alpha: ce });
+  legCard(...legA, { asset: 'HYPE', dir: 'LONG', lev: '3× leverage', alloc: '60% allocation', alpha: eOutExpo(P(t, 10.4, 10.7)), pop: env(t, [10.4], 6), chartP: P(t, 10.4, 11.4) });
+  legCard(...legB, { asset: 'BTC', dir: 'SHORT', lev: '2× leverage', alloc: '40% allocation', alpha: eOutExpo(P(t, 10.8, 11.1)), pop: env(t, [10.8], 6), chartP: P(t, 10.8, 11.8) });
+  const be = eOutBack(clamp((t - 11.4) / 0.35));
+  if (be > 0) {
+    ctx.save(); ctx.globalAlpha *= clamp(be);
+    ctx.translate(buy[0] + buy[2] / 2, buy[1] + buy[3] / 2); ctx.scale(be, be);
+    rrect(-buy[2] / 2, -buy[3] / 2, buy[2], buy[3], 14, C.panel, env(t, [11.4, 12.0], 5) > 0.1 ? C.mint : C.line, 2);
+    txt('Realized profits', -buy[2] / 2 + 28, -6, { size: 18, weight: 400, color: C.muted, ls: 0 });
+    txt('Coin buybacks', -buy[2] / 2 + 28, 26, { size: 24, ls: 0 });
+    ctx.restore();
+  }
+  // exposure readout
+  const xe = P(t, 12.0, 12.25);
+  if (xe > 0) {
+    ctx.save(); ctx.globalAlpha *= xe;
+    txt('Gross exposure', fx + 560, fy + 690, { size: 17, weight: 400, color: C.muted, ls: 0 });
+    txt('2.60×', fx + 560, fy + 735, { size: 42, ls: -1 });
+    txt('Net exposure', fx + 780, fy + 690, { size: 17, weight: 400, color: C.muted, ls: 0 });
+    txt('+1.00×', fx + 780, fy + 735, { size: 42, ls: -1, color: C.mint });
+    ctx.restore();
+  }
+  ctx.restore();
+  ctx.restore();
+  // captions
+  const caps = [[9.6, '01', 'Fees in.'], [10.4, '02', 'Positions open.'], [11.2, '03', 'Profits routed back.']];
+  caps.forEach(([ti, n, s], i) => {
+    const p = P(t, ti, ti + 0.35);
+    const y = 430 + i * 130;
+    const active = t >= ti && (i === caps.length - 1 || t < caps[i + 1][0]);
+    txt(n, 110, y - 70, { size: 20, mono: true, color: C.mint, alpha: p });
+    const words = s.split(' ');
+    if (words.length > 2) {
+      reveal(words.slice(0, 2).join(' '), 110, y, p, { size: 72, color: active ? C.ink : C.muted });
+      reveal(words.slice(2).join(' '), 110, y + 78, P(t, ti + 0.06, ti + 0.4), { size: 72, color: active ? C.mint : C.muted });
+    } else reveal(s, 110, y, p, { size: 72, color: active ? (i === 0 ? C.mint : C.ink) : C.muted });
+  });
+  txt('FROM A COIN TO A STRATEGY', 110, 250, { size: 22, mono: true, color: C.mint, alpha: P(t, 9.7, 9.9) });
+}
+
+function sMontage(t) {
+  const i = Math.min(3, Math.floor((t - 12.8) / B));
+  const k = t - (12.8 + i * B);
+  const words = ['MULTI-PAIR.', 'LONG & SHORT.', 'FEE ROUTING.', 'RISK LIMITS.'];
+  const inv = i % 2 === 0;
+  ctx.fillStyle = inv ? C.mint : C.bg; ctx.fillRect(0, 0, W, H);
+  if (!inv) bg('rgba(25,170,150,.5)', W / 2, H / 2);
+  ctx.save();
+  ctx.globalAlpha = inv ? 0.12 : 0.06;
+  ctx.fillStyle = inv ? C.dark : C.mint;
+  for (let x = -H; x < W + H; x += 90) {
+    const o = (t * 600) % 90;
+    ctx.beginPath(); ctx.moveTo(x + o, 0); ctx.lineTo(x + o + 40, 0); ctx.lineTo(x + o + 40 - H, H); ctx.lineTo(x + o - H, H); ctx.fill();
+  }
+  ctx.restore();
+  if (!inv) { warp(t, 0.7, W / 2, H / 2, C.mint); icon(W / 2, H / 2, 700, { alpha: 0.08, rot: t * 0.5 }); }
+  const w = words[i];
+  punch(w, W / 2, H / 2 + 10, k, { size: fit(w, 1700, 380), color: inv ? C.dark : (i === 1 ? C.ink : C.ink), from: 0.22, chroma: inv ? 0 : 22 });
+  txt(`PERPS PAD — 0${i + 1} / 04`, 110, 110, { size: 22, mono: true, color: inv ? C.dark : C.mint });
+  txt('$PERPS', W - 110, H - 90, { size: 22, mono: true, color: inv ? C.dark : C.mint, align: 'right' });
+}
+
+function tunnel(t, speed, alpha) {
+  const n = 12;
+  for (let j = n - 1; j >= 0; j--) {
+    const z = ((j + speed) % n) / n;
+    const s = 40 + Math.pow(z, 3) * 2600;
+    ctx.save();
+    ctx.globalAlpha = alpha * clamp(z * 2) * clamp((1 - z) * 4);
+    ctx.translate(W / 2, H / 2); ctx.rotate(z * 0.8 + t * 0.3);
+    rrect(-s / 2, -s / 2, s, s, s * 0.22, null, C.mint, 2 + z * 10);
+    ctx.restore();
+  }
+}
+
+function sBuild(t) {
+  bg('rgba(25,140,125,' + (0.3 + 0.4 * P(t, 14.4, 15.6)) + ')', W / 2, H / 2);
+  if (t < 15.6) {
+    const q = P(t, 14.4, 15.6);
+    tunnel(t, 3 * (t - 14.4) + 8 * q * q * (t - 14.4), 0.45);
+    warp(t * (1 + q * 2), 0.3 + q, W / 2, H / 2, C.mint);
+    const letters = ['$P', '$PE', '$PER', '$PERP', '$PERPS'];
+    let i = 0; for (let j = 0; j < STUTTER.length; j++) if (t >= STUTTER[j]) i = j;
+    const k = t - STUTTER[i];
+    const shake = 4 + 24 * P(t, 15.2, 15.6);
+    const full = measure('$PERPS', 300);
+    txt(letters[i], W / 2 - full / 2 + (hash(t * 91) - .5) * shake, H / 2 + 105 + (hash(t * 57) - .5) * shake,
+      { size: 300, color: i === 4 ? C.mint : C.ink, chroma: 26 * Math.exp(-k * 8) + 6 * q, glow: i === 4 ? 40 : 0, glowColor: 'rgba(152,244,206,.7)' });
+  } else {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    const q = eInCubic(P(t, 15.6, 16.0));
+    ctx.fillStyle = C.light; ctx.shadowColor = C.mint; ctx.shadowBlur = 30;
+    ctx.fillRect(W / 2 - q * W / 2, H / 2 - 1.5 - q * 2, q * W, 3 + q * 4);
+    ctx.shadowBlur = 0;
+  }
+}
+
+function sDrop2(t) {
+  const k = t - 16.0;
+  const cy = H * 0.42;
+  bg('rgba(25,175,155,.65)', W / 2, cy);
+  warp(t, 1.4 * Math.exp(-k * 1.2) + 0.25, W / 2, cy, C.mint);
+  ribbons(t, 0.45, { speed: 2.2, rgb: '25,214,189' });
+  dust(t, 0.6, 2, '152,244,206');
+  rings(t, [16.0], W / 2, cy, { r0: 200, r1: 1500, lw: 30, life: 1.2, color: C.mint });
+  rings(t, KICKS.filter(x => x > 16.0 && x < 17.6), W / 2, cy, { r0: 340, r1: 560, lw: 6, alpha: 0.3, life: 0.4, color: C.teal });
+  burst(t, 16.0, W / 2, cy, { n: 120 });
+  // spinning icon behind the ticker
+  const spin = (1 - eOutExpo(clamp(k / 1.3))) * Math.PI * 6;
+  icon(W / 2, cy - 40, 520 * (1 + 0.04 * env(t, KICKS, 12)), { sx: Math.cos(spin), alpha: 0.3, glow: 60 });
+  const sc = lerp(2.2, 1, eOutExpo(clamp(k / 0.3))) * (1 + 0.025 * env(t, KICKS, 12));
+  ctx.save();
+  ctx.translate(W / 2, cy); ctx.scale(sc, sc);
+  txt('$PERPS', 0, 0, { size: 380, color: C.mint, align: 'center', base: 'middle', glow: 60, glowColor: 'rgba(152,244,206,.85)', chroma: 30 * Math.exp(-k * 7) });
+  ctx.restore();
+  reveal('Coins with a strategy.', W / 2, 840, P(t, 16.8, 17.15), { size: 86, align: 'center' });
+  txt('BUILT FOR ELYSIUM', W / 2, 920, { size: 24, mono: true, color: C.mint, align: 'center', alpha: P(t, 17.1, 17.3) });
+  if (t > 17.35) { // pre-cut zoom
+    const q = eInCubic(P(t, 17.35, 17.6));
+    ctx.fillStyle = `rgba(0,0,0,${q * 0.6})`; ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function sBuilder(t) {
+  bg('rgba(25,150,135,.55)', W / 2, H * 0.55);
+  ribbons(t, 0.3, { speed: 1.5, y: H * 0.8, rgb: '25,214,189' });
+  dust(t, 0.5, 1, '152,244,206');
+  const k = t - 17.6;
+  const e = eOutExpo(clamp(k / 0.5));
+  const push = 1 + 0.06 * P(t, 17.6, 19.2) + 0.01 * env(t, KICKS, 12);
+  ctx.save();
+  ctx.translate(W / 2, H / 2 + 70);
+  const s = lerp(1.4, 0.8, e) * push;
+  ctx.scale(s, s);
+  ctx.rotate(lerp(-0.1, 0.025, e));
+  const crop = [300, 120, 1320, 900];
+  const b = browser(0, 0, 1500, LAUNCH, t, typed('perpspad.live/launch', P(t, 17.7, 18.2)), crop);
+  // type into the builder's own fields
+  const map = (x, y) => [-750 + (x - crop[0]) * b.scale, b.top + (y - crop[1]) * b.scale];
+  const name = typed('Perps Pad', P(t, 18.0, 18.5));
+  const tick = typed('PERPS', P(t, 18.5, 18.85));
+  const [nx, ny] = map(377, 434), [tx, ty] = map(791, 434);
+  const fw = 394 * b.scale, fh = 44 * b.scale;
+  rrect(nx, ny, fw, fh, 6 * b.scale, '#081d21', t >= 18.0 && t < 18.5 ? C.mint : C.line, 2);
+  txt(name, nx + 14 * b.scale, ny + fh * 0.68, { size: 17 * b.scale, weight: 400, ls: 0 });
+  rrect(tx, ty, fw, fh, 6 * b.scale, '#081d21', t >= 18.5 && t < 18.9 ? C.mint : C.line, 2);
+  txt('$', tx + 14 * b.scale, ty + fh * 0.68, { size: 15 * b.scale, color: C.mint, ls: 0 });
+  txt(tick || 'TICKER', tx + 32 * b.scale, ty + fh * 0.68, { size: 17 * b.scale, weight: tick ? 700 : 400, color: tick ? C.ink : '#5f7a7a', ls: 0 });
+  ctx.restore();
+  const cp = P(t, 17.65, 17.95);
+  eyebrow('THE STRATEGY BUILDER', 110, 120, cp, C.mint);
+  const bgp = P(t, 17.9, 18.1);
+  if (bgp > 0) { const g = ctx.createLinearGradient(0, H - 330, 0, H); g.addColorStop(0, 'rgba(3,16,15,0)'); g.addColorStop(0.55, `rgba(3,16,15,${0.85 * bgp})`); g.addColorStop(1, `rgba(3,16,15,${0.95 * bgp})`); ctx.fillStyle = g; ctx.fillRect(0, H - 330, W, 330); }
+  if (t >= 18.0) punch('BUILD YOUR COIN.', W / 2, H - 110, t - 18.0, { size: 120, from: 0.15, glow: 20, glowColor: 'rgba(0,0,0,.8)' });
+  if (t > 19.0) { const q = eInCubic(P(t, 19.0, 19.2)); ctx.fillStyle = `rgba(230,255,248,${q * 0.5})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function sOutro(t) {
+  const k = t - 19.2;
+  const cy = H * 0.38;
+  bg('rgba(25,150,135,.55)', W / 2, cy);
+  icon(W / 2, H / 2, 1300, { alpha: 0.06, rot: -0.15 + t * 0.03 });
+  ribbons(t, 0.4, { speed: 0.8, rgb: '25,214,189' });
+  dust(t, 0.5, 0.6, '152,244,206');
+  rings(t, [19.2], W / 2, cy, { r0: 150, r1: 1300, lw: 26, life: 1.4, color: C.mint });
+  burst(t, 19.2, W / 2, cy, { n: 100 });
+  warp(t, 0.9 * Math.exp(-k * 2), W / 2, cy, C.mint);
+  const e = eOutBack(clamp(k / 0.5));
+  const is = 200, ws = 200, gap = 44;
+  const tw = measure('perps', ws, { ls: -8 }) + measure('pad', ws, { ls: -8 });
+  const total = is + gap + tw;
+  ctx.save();
+  ctx.translate(W / 2, cy); ctx.scale(lerp(1.6, 1, e), lerp(1.6, 1, e)); ctx.translate(-W / 2, -cy);
+  icon(W / 2 - total / 2 + is / 2, cy, is, { glow: 50 });
+  wordmark(W / 2 - total / 2 + is + gap, cy + 52, ws, { chroma: 16 * Math.exp(-k * 6), glow: 20 });
+  txt('ON ELYSIUM', W / 2 - total / 2 + is + gap + 8, cy + 150, { size: 24, mono: true, color: C.mint });
+  ctx.restore();
+  reveal('Launch a coin. Give it a strategy.', W / 2, 660, P(t, 19.8, 20.2), { size: 58, align: 'center', color: C.light });
+  const cp = eOutExpo(P(t, 20.3, 20.8));
+  if (cp > 0) {
+    ctx.save();
+    ctx.globalAlpha = cp;
+    ctx.translate(0, (1 - cp) * 40);
+    const bw = 340, bh = 78, gap2 = 22;
+    const uw = measure('perpspad.live', 30, { mono: true, ls: 1, weight: 400 }) + 70;
+    const cw = measure('$PERPS', 28, { mono: true }) + 60;
+    const x0 = W / 2 - (bw + gap2 + uw + gap2 + cw) / 2;
+    ctx.shadowColor = 'rgba(152,244,206,.7)'; ctx.shadowBlur = 30 + 20 * Math.sin(t * 5);
+    rrect(x0, 730, bw, bh, 14, C.mint);
+    ctx.shadowBlur = 0;
+    txt('Build your coin  →', x0 + bw / 2, 780, { size: 28, color: C.dark, align: 'center', ls: 0 });
+    rrect(x0 + bw + gap2, 730, uw, bh, 14, 'rgba(6,26,31,.8)', C.line, 2);
+    txt('perpspad.live', x0 + bw + gap2 + uw / 2, 780, { size: 30, mono: true, color: C.ink, align: 'center', ls: 1, weight: 400 });
+    rrect(x0 + bw + gap2 + uw + gap2, 730, cw, bh, 39, 'rgba(152,244,206,.1)', C.mint, 2);
+    txt('$PERPS', x0 + bw + gap2 + uw + gap2 + cw / 2, 779, { size: 28, mono: true, color: C.mint, align: 'center' });
+    ctx.restore();
+  }
+  txt('@Perpspad_live', W / 2, 880, { size: 26, mono: true, weight: 400, color: C.muted, align: 'center', alpha: P(t, 20.7, 21.0) });
+  txt('Strategy builder live. Execution coming next. Perpetual positions can lose money or be liquidated.', W / 2, H - 50,
+    { size: 18, weight: 400, color: C.muted, align: 'center', ls: 0, alpha: 0.8 * P(t, 20.9, 21.3) });
+}
+
+// ------------------------------------------------------------------ frame
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  const sh = env(t, BIG, 7) * 30 + env(t, MED, 14) * 10;
+  ctx.save();
+  ctx.translate((hash(t * 133) - .5) * sh, (hash(t * 171) - .5) * sh);
+  const zk = 1 + 0.01 * env(t, KICKS, 14);
+  ctx.translate(W / 2, H / 2); ctx.scale(zk, zk); ctx.translate(-W / 2, -H / 2);
+  if (t < 3.2) sIntro(t);
+  else if (t < 4.8) sDrop1(t);
+  else if (t < 6.4) sLongShort(t, false);
+  else if (t < 8.0) sLongShort(t, true);
+  else if (t < 9.6) sMix(t);
+  else if (t < 12.8) sEngine(t);
+  else if (t < 14.4) sMontage(t);
+  else if (t < 16.0) sBuild(t);
+  else if (t < 17.6) sDrop2(t);
+  else if (t < 19.2) sBuilder(t);
+  else sOutro(t);
+  ctx.restore();
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.filter = 'none';
+  for (const g of [3.2, 9.6, 12.8, 15.4, 16.0, 17.6, 19.2]) {
+    const k = t - g;
+    if (k >= 0 && k < 0.16) {
+      const f = Math.floor(k * 60);
+      for (let s = 0; s < 9; s++) {
+        const y = Math.floor(hash(s * 7 + g * 3 + f) * H);
+        const h = 10 + Math.floor(hash(s * 11 + g) * 70);
+        const dx = (hash(s * 13 + f) - .5) * 160 * (1 - k / 0.16);
+        ctx.drawImage(cv, 0, y, W, h, dx, y, W, h);
+      }
+    }
+  }
+  const fl = Math.max(
+    env(t, BIG, 9) * 0.85,
+    env(t, INTRO_HITS, 14) * 0.35,
+    env(t, [4.8, 6.4, 8.0, 9.6, 12.8, 17.6], 12) * 0.45,
+    env(t, [...MONTAGE.slice(1), ...STUTTER, 8.4, 10.4, 11.2], 16) * 0.2
+  );
+  if (fl > 0.005) { ctx.fillStyle = `rgba(225,255,246,${fl})`; ctx.fillRect(0, 0, W, H); }
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 1.05);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.6)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.globalAlpha = 0.045;
+  ctx.globalCompositeOperation = 'overlay';
+  const fr = Math.floor(t * 30);
+  const ox = Math.floor(hash(fr) * 384), oy = Math.floor(hash(fr + 0.5) * 384);
+  for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+  const fade = Math.max(1 - P(t, 0, 0.25), P(t, 21.9, 23.0));
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+window.render = render;
+window.DUR = DUR;
+</script>
+</body>
+</html>
