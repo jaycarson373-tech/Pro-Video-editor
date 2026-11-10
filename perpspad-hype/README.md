@@ -25,3 +25,15 @@ All copy, colors (`#061b1e`, `#98f4ce`, `#19d6bd`, `#f1b3b7`), the DM Sans font 
 ```
 
 `node render.js --at 3.4 16.3` writes single preview PNGs to `out/preview/`. Set `FPS=30` to render at 30 fps.
+
+## Chill cut
+
+`perpspad-chill.mp4` runs 31 s at 1080p60. It's a calmer edit set to an original 96 BPM lo-fi house track (Dm9–B♭maj7–Fmaj7–C6/9, with electric-piano keys, vinyl texture and soft drums). It uses slow eases, cross-dissolves and sentence-case site typography, with no strobes or glitches. It adds a burn section: "20% of fees from coins launched on Perps Pad burn $PERPS."
+
+Note: the site's guide page currently says "No $PERPS buyback percentage or token contract is configured." Update it so the site matches the burn claim.
+
+```bash
+chill/build.sh
+```
+
+`node chill/render.js --at 20.6` writes preview frames to `chill/out/preview/`.
