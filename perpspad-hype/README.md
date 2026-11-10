@@ -37,3 +37,11 @@ chill/build.sh
 ```
 
 `node chill/render.js --at 20.6` writes preview frames to `chill/out/preview/`.
+
+## Logo spin GIF
+
+`perpspad-logo-spin.gif` (480px, loops) and `perpspad-logo-spin.mp4` (1080×1080) show the logo spinning fast in 3D with motion blur and RGB-split/slice glitches. It locks in with a flash and holds still for 2.2 s.
+
+```bash
+python3 logo-spin.py assets/brand/perps-pad-podium.png perpspad-logo-spin
+```
