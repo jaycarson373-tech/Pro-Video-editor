@@ -1,0 +1,470 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GPU Pad promo scene</title>
+<style>
+  @font-face { font-family: 'Space Grotesk'; src: url(assets/fonts/SpaceGrotesk.woff2); font-weight: 300 700; }
+  @font-face { font-family: 'DM Sans'; src: url(assets/fonts/DMSans.woff2); font-weight: 100 1000; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<script>
+// Deterministic, time-driven scene: render(t) draws the frame at t seconds.
+// Beat grid: 100 BPM -> beat 0.6 s, bar 2.4 s (matches music.py).
+const W = 1920, H = 1080, DUR = 18.0;
+// GPU Pad brand tokens (from gpupad.fun)
+const C = {
+  bg: '#090b09', panel: '#0d110d', raised: '#121712', line: '#28302c', line2: '#303b2c',
+  ink: '#f1f4ec', dim: '#a3ada2', mute: '#6f786e', lime: '#76b900', light: '#c7ef90', dark: '#0a0f04'
+};
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+// ------------------------------------------------------------------ utils
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eOut = x => { x = clamp(x); return x >= 1 ? 1 : 1 - Math.pow(2, -10 * x); };
+const eOut4 = x => 1 - Math.pow(1 - clamp(x), 4);
+const eIn = x => { x = clamp(x); return x * x * x; };
+const eInOut = x => { x = clamp(x); return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+const typed = (s, p) => s.slice(0, Math.floor(s.length * clamp(p) + 1e-6));
+
+const FAM = { head: '"Space Grotesk"', body: '"DM Sans"', mono: '"JetBrains Mono"' };
+function setFont(size, o = {}) {
+  const fam = o.fam || 'head';
+  ctx.font = `${o.weight || (fam === 'head' ? 500 : 400)} ${size}px ${FAM[fam]}`;
+  ctx.letterSpacing = (o.ls != null ? o.ls : fam === 'mono' ? size * 0.14 : fam === 'head' ? -size * 0.04 : 0) + 'px';
+}
+function measure(s, size, o = {}) { ctx.save(); setFont(size, o); const w = ctx.measureText(s).width; ctx.restore(); return w; }
+function txt(s, x, y, o = {}) {
+  ctx.save();
+  setFont(o.size || 40, o);
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = o.base || 'alphabetic';
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  if (o.glow) { ctx.shadowColor = o.glowColor || 'rgba(118,185,0,.55)'; ctx.shadowBlur = o.glow; }
+  ctx.fillStyle = o.color || C.ink;
+  ctx.fillText(s, x, y);
+  ctx.restore();
+}
+// line slides up out of a mask
+function reveal(s, x, y, p, o = {}) {
+  if (p <= 0) return;
+  const size = o.size || 40;
+  const w = measure(s, size, o);
+  const al = o.align || 'left';
+  const x0 = al === 'left' ? x : al === 'center' ? x - w / 2 : x - w;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x0 - 40, y - size * 1.02, w + 80, size * 1.36); ctx.clip();
+  txt(s, x, y + (1 - eOut(p)) * size * 1.15, o);
+  ctx.restore();
+}
+function fadeUp(s, x, y, p, o = {}) {
+  if (p <= 0) return;
+  const e = eOut4(p);
+  txt(s, x, y + (1 - e) * 22, { ...o, alpha: (o.alpha ?? 1) * e });
+}
+function rrect(x, y, w, h, r, fill, stroke, lw = 1.5) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function label(s, x, y, p, o = {}) { // mono eyebrow with lime dot
+  if (p <= 0) return;
+  const size = o.size || 20;
+  const full = o.full || s;
+  const w = measure(full, size, { fam: 'mono' }) + 22;
+  const x0 = o.align === 'center' ? x - w / 2 : x;
+  ctx.save(); ctx.globalAlpha *= eOut4(p);
+  ctx.fillStyle = C.lime; ctx.beginPath(); ctx.arc(x0 + 4, y - size * 0.34, 4, 0, Math.PI * 2); ctx.fill();
+  txt(s, x0 + 22, y, { size, fam: 'mono', color: o.color || C.dim });
+  ctx.restore();
+}
+
+// ------------------------------------------------------------------ assets
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; }); }
+let LOGO, BLOOM, SHEEN, GRAIN;
+const LS = 1254; // logo source size
+window.ready = (async () => {
+  LOGO = await loadImg('assets/gpu-pad-logo.png');
+  await Promise.all(['500 80px "Space Grotesk"', '700 80px "Space Grotesk"', '400 40px "DM Sans"', '500 40px "DM Sans"', '400 20px "JetBrains Mono"', '500 20px "JetBrains Mono"'].map(f => document.fonts.load(f)));
+  BLOOM = document.createElement('canvas'); BLOOM.width = BLOOM.height = 640;
+  const b = BLOOM.getContext('2d'); b.filter = 'blur(26px)'; b.drawImage(LOGO, 70, 70, 500, 500);
+  SHEEN = document.createElement('canvas'); SHEEN.width = SHEEN.height = 700;
+  GRAIN = document.createElement('canvas'); GRAIN.width = GRAIN.height = 384;
+  const g = GRAIN.getContext('2d'); const id = g.createImageData(384, 384);
+  for (let i = 0; i < id.data.length; i += 4) { const v = Math.floor(hash(i * 0.37) * 255); id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0);
+  return true;
+})();
+
+// logo: black background drops out with 'screen'; bloom and an optional light sweep on top
+function logo(cx, cy, size, o = {}) {
+  const a = o.alpha ?? 1;
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = clamp(a * (o.bloom ?? 0.55));
+  const bs = size * 640 / 500;
+  ctx.drawImage(BLOOM, cx - bs / 2, cy - bs / 2, bs, bs);
+  ctx.globalAlpha = clamp(a);
+  ctx.drawImage(LOGO, cx - size / 2, cy - size / 2, size, size);
+  if (o.sheen != null && o.sheen > 0 && o.sheen < 1) {
+    const s = SHEEN.getContext('2d');
+    s.globalCompositeOperation = 'source-over';
+    s.fillStyle = '#000'; s.fillRect(0, 0, 700, 700);
+    const x = lerp(-250, 950, o.sheen);
+    const g = s.createLinearGradient(x - 130, 0, x + 130, 260);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.5, 'rgba(255,255,255,.75)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    s.fillStyle = g; s.fillRect(0, 0, 700, 700);
+    s.globalCompositeOperation = 'multiply';
+    s.drawImage(LOGO, 0, 0, 700, 700);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = clamp(a);
+    ctx.drawImage(SHEEN, cx - size / 2, cy - size / 2, size, size);
+  }
+  ctx.restore();
+}
+
+// circuit traces running from the chip's twelve pins out to the frame edges
+function traces(cx, cy, size, t, o = {}) {
+  const k = size / LS;
+  const px = [480, 628, 775].map(v => cx + (v - 627) * k);
+  const py = [475, 618, 760].map(v => cy + (v - 627) * k);
+  const top = cy - 505 * k, left = cx - 497 * k, right = cx + 497 * k;
+  const paths = [];
+  // top pins: go vertical, jog sideways, continue to the edge
+  px.forEach((x, i) => {
+    const jog = (i - 1) * 190;
+    paths.push([[x, top - 6], [x, top - 70 - i * 26], [x + jog, top - 130 - i * 26], [x + jog, -20]]);
+  });
+  // bottom pins: the outer two route around the text below the chip, the middle one ends in a node
+  const bot = cy + 478 * k;
+  paths.push([[px[0], bot], [px[0], bot + 46], [cx - 620, bot + 46], [cx - 660, bot + 86], [cx - 660, H + 20]]);
+  paths.push([[px[2], bot], [px[2], bot + 46], [cx + 620, bot + 46], [cx + 660, bot + 86], [cx + 660, H + 20]]);
+  paths.push([[px[1], bot], [px[1], bot + 30]]);
+  py.forEach((y, i) => {
+    const jog = (i - 1) * 150;
+    paths.push([[left - 6, y], [left - 150 - i * 40, y], [left - 220 - i * 40, y + jog], [-20, y + jog]]);
+    paths.push([[right + 6, y], [right + 150 + (2 - i) * 40, y], [right + 220 + (2 - i) * 40, y + jog], [W + 20, y + jog]]);
+  });
+  const draw = o.draw ?? 1, alpha = o.alpha ?? 1;
+  paths.forEach((pts, pi) => {
+    const segs = []; let total = 0;
+    for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segs.push(d); total += d; }
+    const at = d => { let i = 0; while (i < segs.length - 1 && d > segs[i]) { d -= segs[i]; i++; } const u = clamp(d / segs[i]); return [lerp(pts[i][0], pts[i + 1][0], u), lerp(pts[i][1], pts[i + 1][1], u)]; };
+    // line (drawn from the edge inward as `draw` goes 0 -> 1)
+    const start = total * (1 - clamp(draw));
+    ctx.save();
+    ctx.globalAlpha = 0.16 * alpha;
+    ctx.strokeStyle = C.lime; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    const s0 = at(start); ctx.moveTo(s0[0], s0[1]);
+    let acc = 0;
+    for (let i = 1; i < pts.length; i++) { acc += segs[i - 1]; if (acc > start) ctx.lineTo(pts[i][0], pts[i][1]); }
+    ctx.stroke();
+    if (pts.length === 2 && draw >= 1) { ctx.globalAlpha = 0.5 * alpha; ctx.fillStyle = C.lime; ctx.beginPath(); ctx.arc(pts[1][0], pts[1][1], 3, 0, Math.PI * 2); ctx.fill(); }
+    // pulses travelling toward the chip
+    if (o.pulses && pts.length > 2) {
+      const n = 2;
+      for (let j = 0; j < n; j++) {
+        const ph = ((t * 0.34 + hash(pi * 3 + j) + j / n) % 1);
+        const d = total * (1 - ph);
+        if (d < start) continue;
+        for (let s = 0; s < 9; s++) {
+          const [x, y] = at(Math.min(total, d + s * 7));
+          ctx.globalAlpha = alpha * o.pulses * (1 - s / 9) * 0.8 * Math.sin(Math.PI * clamp(ph * 1.05));
+          ctx.fillStyle = s === 0 ? C.light : C.lime;
+          ctx.beginPath(); ctx.arc(x, y, s === 0 ? 3 : 2.2, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+    ctx.restore();
+  });
+}
+
+// ------------------------------------------------------------------ background
+function background(t, glowX = W / 2, glowY = H / 2, glow = 0.13) {
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(glowX, glowY, 0, glowX, glowY, W * 0.6);
+  g.addColorStop(0, `rgba(118,185,0,${glow})`); g.addColorStop(0.5, `rgba(118,185,0,${glow * 0.3})`); g.addColorStop(1, 'rgba(118,185,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // dot grid, slowly drifting
+  ctx.save();
+  ctx.fillStyle = '#c7ef90';
+  const off = (t * 6) % 48;
+  for (let y = -48 + off; y < H + 48; y += 48) for (let x = 24; x < W; x += 48) {
+    const d = Math.hypot(x - glowX, y - glowY) / (W * 0.55);
+    ctx.globalAlpha = 0.11 * clamp(1 - d * 0.75);
+    ctx.fillRect(x, y, 2, 2);
+  }
+  ctx.restore();
+}
+
+function header(t, alpha) { // small persistent brand lockup, like the site header
+  if (alpha <= 0) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  logo(126, 92, 64, { bloom: 0.35 });
+  txt('GPU', 172, 105, { size: 34, weight: 600, ls: -1 });
+  txt('Pad', 172 + measure('GPU ', 34, { weight: 600, ls: -1 }), 105, { size: 34, weight: 400, ls: -1, color: C.dim });
+  txt('gpupad.fun', W - 96, 102, { size: 20, fam: 'mono', color: C.mute, align: 'right' });
+  ctx.restore();
+}
+
+// ------------------------------------------------------------------ scenes
+// S1 0.0-2.4  logo powers on
+function sLogo(t) {
+  const cx = W / 2, cy = 455, size = 500;
+  background(t, cx, cy, 0.05 + 0.13 * eOut4(P(t, 0.6, 1.6)));
+  const out = 1 - eIn(P(t, 2.1, 2.4));
+  ctx.save(); ctx.globalAlpha = out;
+  traces(cx, cy, size, t, { draw: eInOut(P(t, 0.0, 0.62)), alpha: 1, pulses: P(t, 0.5, 1.0) });
+  // neon-style power-on at 0.6 s
+  let a = 0;
+  if (t >= 0.6) a = t < 0.66 ? 0.65 : t < 0.72 ? 0.18 : t < 0.78 ? 0.85 : t < 0.82 ? 0.45 : 1;
+  const on = P(t, 0.6, 1.5);
+  logo(cx, cy, size * lerp(1.035, 1, eOut4(on)), { alpha: a, bloom: 0.55 + 0.6 * (1 - eOut4(on)), sheen: P(t, 1.15, 1.95) });
+  const wy = 850;
+  const wG = measure('GPU ', 104, { weight: 600 }), wP = measure('Pad', 104, { weight: 400 });
+  const x0 = cx - (wG + wP) / 2;
+  reveal('GPU', x0, wy, P(t, 1.2, 1.7), { size: 104, weight: 600 });
+  reveal('Pad', x0 + wG, wy, P(t, 1.28, 1.78), { size: 104, weight: 400, color: C.dim });
+  label('TOKENIZED AGENTS / FEE-FUNDED COMPUTE', cx, 925, P(t, 1.7, 2.1), { align: 'center' });
+  ctx.restore();
+}
+
+// S2 2.4-4.8  headline
+function sHeadline(t) {
+  background(t, W / 2, H * 0.5, 0.12);
+  const out = 1 - eIn(P(t, 4.5, 4.8));
+  ctx.save(); ctx.globalAlpha = out;
+  const drift = lerp(12, 0, eOut4(P(t, 2.4, 4.8)));
+  ctx.translate(0, drift - (1 - out) * 20);
+  label('THE AI AGENT LAUNCHPAD ON SOLANA', W / 2, 330, P(t, 2.5, 2.9), { align: 'center' });
+  reveal('The AI agent', W / 2, 545, P(t, 2.4, 2.95), { size: 196, align: 'center', ls: -8.6 });
+  reveal('launchpad.', W / 2, 745, P(t, 3.0, 3.55), { size: 196, align: 'center', ls: -8.6, color: C.lime, glow: 34, glowColor: 'rgba(118,185,0,.35)' });
+  fadeUp('Launch tokenized AI agents. Give them a mission. Track what they ship.', W / 2, 860, P(t, 3.6, 4.1), { size: 36, fam: 'body', color: C.dim, align: 'center' });
+  ctx.restore();
+}
+
+// S3 4.8-9.6  mission -> build -> ship, inside the agent workspace
+function check(x, y, p, r = 13) {
+  if (p <= 0) return;
+  const e = eOut4(p);
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(lerp(0.6, 1, e), lerp(0.6, 1, e)); ctx.globalAlpha *= e;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = C.lime; ctx.fill();
+  ctx.strokeStyle = C.dark; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(-5.5, 0.5); ctx.lineTo(-1.5, 4.5); ctx.lineTo(6, -4); ctx.stroke();
+  ctx.restore();
+}
+function sWorkspace(t) {
+  background(t, W * 0.68, H * 0.52, 0.11);
+  const T = [4.8, 6.6, 8.4];
+  const step = t < T[1] ? 0 : t < T[2] ? 1 : 2;
+  const out = 1 - eIn(P(t, 9.3, 9.6));
+  ctx.save(); ctx.globalAlpha = out;
+  // left: three lines, the current one lit
+  const caps = [['01', 'Give it a mission.'], ['02', 'Fund builds with', 'creator fees.'], ['03', 'Track what it ships.']];
+  let y = 400;
+  caps.forEach((c, i) => {
+    const p = P(t, T[i], T[i] + 0.45);
+    const active = step === i;
+    const dimA = active ? 1 : lerp(1, 0.34, P(t, T[i + 1] ?? 99, (T[i + 1] ?? 99) + 0.3));
+    ctx.save(); ctx.globalAlpha *= dimA;
+    fadeUp(c[0], 150, y - 62, p, { size: 20, fam: 'mono', color: C.lime });
+    reveal(c[1], 150, y, p, { size: 74, ls: -2.8 });
+    if (c[2]) { y += 82; reveal(c[2], 150, y, P(t, T[i] + 0.06, T[i] + 0.5), { size: 74, ls: -2.8, color: active ? C.lime : C.ink }); }
+    ctx.restore();
+    y += 168;
+  });
+  // right: workspace card (mirrors the site's "GPU PAD / AGENT WORKSPACE" panel)
+  const e = eOut(P(t, 4.8, 5.5));
+  const cx0 = 960, cy0 = 232, cw = 810, ch = 632;
+  ctx.save();
+  ctx.globalAlpha *= e;
+  ctx.translate(0, (1 - e) * 46);
+  ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 70; ctx.shadowOffsetY = 30;
+  rrect(cx0, cy0, cw, ch, 10, C.panel);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  rrect(cx0, cy0, cw, ch, 10, null, C.line2, 1.5);
+  ctx.fillStyle = C.lime; ctx.beginPath(); ctx.arc(cx0 + 36, cy0 + 40, 4, 0, Math.PI * 2); ctx.fill();
+  txt('GPU PAD / AGENT WORKSPACE', cx0 + 54, cy0 + 46, { size: 16, fam: 'mono', color: C.dim });
+  txt('SYSTEM PREVIEW', cx0 + cw - 34, cy0 + 46, { size: 16, fam: 'mono', color: C.mute, align: 'right' });
+  // tabs
+  const tx = cx0 + 34, ty = cy0 + 78, tw = (cw - 68) / 3, th = 58;
+  rrect(tx, ty, tw * 3, th, 4, null, C.line, 1.5);
+  const sel = step + (step < 2 ? eInOut(P(t, T[step + 1] - 0.001, T[step + 1] + 0.3)) : 0);
+  const selX = tx + tw * (t < T[1] ? 0 : t < T[2] ? eInOut(P(t, T[1], T[1] + 0.35)) : 1 + eInOut(P(t, T[2], T[2] + 0.35)));
+  rrect(selX, ty, tw, th, 4, 'rgba(118,185,0,.13)');
+  ctx.fillStyle = C.lime; ctx.fillRect(selX, ty + th - 3, tw, 3);
+  ['Plan', 'Build', 'Ship'].forEach((s, i) => {
+    const on = step === i;
+    txt(s, tx + tw * i + tw / 2 - 16, ty + 37, { size: 22, fam: 'body', weight: 500, color: on ? C.ink : C.dim, align: 'center' });
+    txt('0' + (i + 1), tx + tw * i + tw / 2 + 32, ty + 36, { size: 14, fam: 'mono', color: on ? C.lime : C.mute });
+    if (i) { ctx.fillStyle = C.line; ctx.fillRect(tx + tw * i, ty, 1.5, th); }
+  });
+  // body
+  const bx = cx0 + 34, by = ty + th + 34, bw = cw - 68;
+  const bodyIn = k => eOut4(P(t, T[k] + 0.12, T[k] + 0.5));
+  ctx.save();
+  if (step === 0) {
+    ctx.globalAlpha *= 1 - P(t, T[1] - 0.15, T[1]);
+    txt("Your agent's first brief", bx, by + 18, { size: 20, fam: 'body', color: C.dim });
+    rrect(bx, by + 38, bw, 76, 6, '#0a0d0a', C.lime, 1.5);
+    const brief = typed('an agent that researches new Solana tokens', P(t, 5.0, 5.95));
+    txt(brief, bx + 26, by + 86, { size: 25, fam: 'body', color: C.ink });
+    if (Math.floor(t * 3.3) % 2 === 0 || t < 5.95) { ctx.fillStyle = C.lime; ctx.fillRect(bx + 30 + measure(brief, 25, { fam: 'body' }), by + 62, 2.5, 30); }
+    rrect(bx + bw - 62, by + 50, 50, 52, 4, C.lime);
+    ctx.strokeStyle = C.dark; ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(bx + bw - 46, by + 86); ctx.lineTo(bx + bw - 28, by + 66); ctx.moveTo(bx + bw - 41, by + 66); ctx.lineTo(bx + bw - 28, by + 66); ctx.lineTo(bx + bw - 28, by + 79); ctx.stroke();
+    txt('EDITABLE ROADMAP DRAFT', bx, by + 172, { size: 15, fam: 'mono', color: C.mute, alpha: P(t, 5.7, 5.95) });
+    ['Research publication and source library', 'Dataset explorer and research dashboard', 'Specialized intelligence workspace'].forEach((m, i) => {
+      const p = eOut4(P(t, 5.85 + i * 0.16, 6.2 + i * 0.16));
+      if (p <= 0) return;
+      const ry = by + 192 + i * 82;
+      ctx.save(); ctx.globalAlpha *= p; ctx.translate(0, (1 - p) * 16);
+      rrect(bx, ry, bw, 68, 6, C.raised, C.line, 1.5);
+      txt('M' + (i + 1), bx + 24, ry + 42, { size: 16, fam: 'mono', color: C.lime });
+      txt(m, bx + 84, ry + 43, { size: 23, fam: 'body', color: C.ink });
+      ctx.restore();
+    });
+  } else if (step === 1) {
+    const p = bodyIn(1);
+    ctx.globalAlpha *= p * (1 - P(t, T[2] - 0.15, T[2]));
+    ctx.translate(0, (1 - p) * 16);
+    txt('{ }  src / app.jsx', bx, by + 16, { size: 16, fam: 'mono', color: C.dim });
+    txt('ILLUSTRATIVE', bx + bw, by + 16, { size: 14, fam: 'mono', color: C.mute, align: 'right' });
+    ctx.fillStyle = C.line; ctx.fillRect(bx, by + 36, bw, 1.5);
+    txt('The agent works inside its budget.', bx, by + 94, { size: 34, fam: 'head', ls: -1 });
+    ['input: approved specification', 'compute: reserved before execution', 'output: source + build checks'].forEach((l, i) => {
+      const lp = P(t, 6.95 + i * 0.3, 7.35 + i * 0.3);
+      txt('0' + (i + 1), bx, by + 156 + i * 46, { size: 18, fam: 'mono', color: C.mute, alpha: clamp(lp * 4) });
+      txt(typed(l, lp), bx + 56, by + 156 + i * 46, { size: 21, fam: 'mono', color: C.light, ls: 1 });
+    });
+    // compute budget drawn down by the build (no figures: illustrative)
+    const my = by + 330;
+    txt('Creator fees', bx, my, { size: 19, fam: 'body', color: C.dim });
+    txt('Approved build', bx + bw, my, { size: 19, fam: 'body', color: C.dim, align: 'right' });
+    rrect(bx, my + 20, bw, 14, 7, '#141a14');
+    const f = eInOut(P(t, 7.0, 8.3));
+    const g = ctx.createLinearGradient(bx, 0, bx + bw, 0); g.addColorStop(0, C.lime); g.addColorStop(1, C.light);
+    ctx.save(); ctx.shadowColor = 'rgba(118,185,0,.6)'; ctx.shadowBlur = 16; rrect(bx, my + 20, Math.max(14, bw * f), 14, 7, g); ctx.restore();
+    txt('Compute reserved before execution', bx, my + 72, { size: 17, fam: 'mono', color: C.mute, ls: 0.6 });
+  } else {
+    const p = bodyIn(2);
+    ctx.globalAlpha *= p;
+    ctx.translate(0, (1 - p) * 16);
+    txt('DEPLOYMENT RECORD', bx, by + 16, { size: 16, fam: 'mono', color: C.dim });
+    ctx.fillStyle = C.line; ctx.fillRect(bx, by + 36, bw, 1.5);
+    ['Costs', 'Build history', 'A working product'].forEach((m, i) => {
+      const ry = by + 62 + i * 88;
+      const rp = eOut4(P(t, 8.5 + i * 0.1, 8.8 + i * 0.1));
+      ctx.save(); ctx.globalAlpha *= rp;
+      rrect(bx, ry, bw, 72, 6, C.raised, C.line, 1.5);
+      txt(m, bx + 26, ry + 46, { size: 25, fam: 'body', weight: 500 });
+      txt('RECORDED', bx + bw - 66, ry + 44, { size: 14, fam: 'mono', color: C.lime, align: 'right', alpha: P(t, 8.66 + i * 0.1, 8.84 + i * 0.1) });
+      ctx.restore();
+      check(bx + bw - 34, ry + 36, P(t, 8.62 + i * 0.1, 8.9 + i * 0.1));
+    });
+    txt('Inspect the output. Follow each deployment.', bx, by + 366, { size: 20, fam: 'body', color: C.dim, alpha: P(t, 8.9, 9.1) });
+  }
+  ctx.restore();
+  ctx.restore();
+  ctx.restore();
+}
+
+// S4 9.6-12.0  where the creator fees go
+function sFees(t) {
+  background(t, W / 2, H * 0.6, 0.11);
+  const out = 1 - eIn(P(t, 11.7, 12.0));
+  ctx.save(); ctx.globalAlpha = out;
+  label('THE FEE ECONOMY / EACH LAUNCHED AGENT', W / 2, 262, P(t, 9.65, 10.0), { align: 'center' });
+  reveal('Where the creator fees go.', W / 2, 372, P(t, 9.6, 10.1), { size: 88, align: 'center', ls: -3.4 });
+  const bx = 190, bw = W - 380, by = 610, bh = 26, gap = 10;
+  const segs = [[50, 'Holder rewards', C.lime, 9.75], [30, 'Agent AI credits', C.light, 10.2], [20, 'GPU Pad buyback + burn', C.ink, 10.65]];
+  rrect(bx, by, bw, bh, 13, '#141a14');
+  let x = bx;
+  segs.forEach(([pct, name, col, t0], i) => {
+    const w = (bw - gap * 2) * pct / 100;
+    const p = eOut(P(t, t0, t0 + 0.6));
+    if (p > 0) {
+      ctx.save(); ctx.shadowColor = col === C.ink ? 'rgba(241,244,236,.35)' : 'rgba(118,185,0,.55)'; ctx.shadowBlur = 22;
+      rrect(x, by, Math.max(26, w * p), bh, 13, col); ctx.restore();
+      const n = Math.round(pct * eOut4(P(t, t0, t0 + 0.45)));
+      const tp = P(t, t0, t0 + 0.4);
+      ctx.save(); ctx.globalAlpha *= eOut4(tp); ctx.translate(0, (1 - eOut4(tp)) * 18);
+      txt(n + '%', x, by - 36, { size: 128, ls: -5.5, color: col });
+      txt(name, x + 2, by + bh + 58, { size: 30, fam: 'body', weight: 500 });
+      ctx.restore();
+    }
+    x += w + gap;
+  });
+  txt('Allocations begin from verified creator-fee receipts. Trading volume, funding and successful builds are not guaranteed.', W / 2, 880,
+    { size: 22, fam: 'body', color: C.dim, align: 'center', alpha: 0.75 * P(t, 10.8, 11.1) });
+  ctx.restore();
+}
+
+// S5 12.0-18.0  outro
+function sOutro(t) {
+  const cx = W / 2, cy = 330, size = 330;
+  background(t, cx, cy + 60, 0.08 + 0.1 * eOut4(P(t, 12.0, 13.0)));
+  traces(cx, cy, size, t, { draw: eInOut(P(t, 12.0, 12.7)), alpha: 0.9, pulses: P(t, 12.3, 13.0) });
+  const on = P(t, 12.0, 12.9);
+  logo(cx, cy, size * lerp(1.05, 1, eOut4(on)), { alpha: eOut4(P(t, 12.0, 12.35)), bloom: 0.55 + 0.5 * (1 - eOut4(on)), sheen: P(t, 13.6, 14.5) });
+  reveal('Launch your agent.', cx, 690, P(t, 12.6, 13.15), { size: 132, align: 'center', ls: -5.4 });
+  fadeUp('Define what it builds. Set the milestones. Fund the work.', cx, 762, P(t, 13.1, 13.6), { size: 34, fam: 'body', color: C.dim, align: 'center' });
+  const p = eOut4(P(t, 13.2, 13.9));
+  if (p > 0) {
+    ctx.save(); ctx.globalAlpha = p; ctx.translate(0, (1 - p) * 24);
+    const bh = 76, gap = 20;
+    const w1 = measure('GPUPad.fun', 32, { weight: 600, ls: -0.5 }) + 86;
+    const w2 = measure('@GPUPad_', 24, { fam: 'mono', ls: 1 }) + 64;
+    const x0 = cx - (w1 + gap + w2) / 2, y0 = 832;
+    ctx.save(); ctx.shadowColor = 'rgba(118,185,0,.55)'; ctx.shadowBlur = 30; rrect(x0, y0, w1, bh, 6, C.lime); ctx.restore();
+    txt('GPUPad.fun', x0 + w1 / 2, y0 + 50, { size: 32, weight: 600, ls: -0.5, color: C.dark, align: 'center' });
+    rrect(x0 + w1 + gap, y0, w2, bh, 6, '#0c100c', C.line2, 1.5);
+    txt('@GPUPad_', x0 + w1 + gap + w2 / 2, y0 + 47, { size: 24, fam: 'mono', ls: 1, color: C.ink, align: 'center' });
+    ctx.restore();
+  }
+  txt('THE AI AGENT LAUNCHPAD ON SOLANA', cx, 990, { size: 18, fam: 'mono', color: C.mute, align: 'center', alpha: P(t, 13.8, 14.3) });
+}
+
+// ------------------------------------------------------------------ frame
+const SCENES = [[0, sLogo], [2.4, sHeadline], [4.8, sWorkspace], [9.6, sFees], [12.0, sOutro]];
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  let idx = 0;
+  for (let i = 0; i < SCENES.length; i++) if (t >= SCENES[i][0]) idx = i;
+  ctx.save();
+  SCENES[idx][1](t);
+  ctx.restore();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  // brand lockup stays up through the middle three scenes
+  header(t, Math.min(eOut4(P(t, 2.5, 3.0)), 1 - P(t, 11.7, 12.0)));
+  // soft vignette + fine grain
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.4, W / 2, H / 2, H * 1.1);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.5)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.globalAlpha = 0.03; ctx.globalCompositeOperation = 'overlay';
+  const fr = Math.floor(t * 24);
+  const ox = Math.floor(hash(fr) * 384), oy = Math.floor(hash(fr + 0.5) * 384);
+  for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+  const fade = Math.max(1 - P(t, 0, 0.35), P(t, 16.6, 17.9));
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+window.render = render;
+window.DUR = DUR;
+</script>
+</body>
+</html>
