@@ -1,0 +1,533 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Optima promo scene</title>
+<style>
+  @font-face { font-family: DM; src: url(assets/dm-sans.ttf); font-weight: 100 1000; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script type="module">
+// Deterministic, time-driven scene: render(t) draws the frame at t seconds.
+// ?fmt=v -> 1080x1920 (9:16), ?fmt=h -> 1920x1080 (16:9). 120 BPM: beat 0.5 s; every cut sits on a beat.
+import './ring3d.js';
+
+const PORT = new URLSearchParams(location.search).get('fmt') !== 'h';
+const W = PORT ? 1080 : 1920, H = PORT ? 1920 : 1080, DUR = 30;
+const V = (p, l) => PORT ? p : l;
+const C = { off: '#F5F6F1', forest: '#24301F', deep: '#141B11', lime: '#C5F56A', red: '#E5484D', redDark: '#B9333A', ink: '#24301F', mute: '#6A7466', paper: '#FFFFFF' };
+const cv = document.getElementById('c');
+cv.width = W; cv.height = H;
+const ctx = cv.getContext('2d');
+const CFG = await (await fetch('config.json')).json();
+const TICK = '$' + CFG.ticker;
+
+// ------------------------------------------------------------------ utils
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const pr = (t, a, b) => clamp((t - a) / (b - a));
+const outExpo = x => { x = clamp(x); return x >= 1 ? 1 : 1 - Math.pow(2, -10 * x); };
+const outCubic = x => 1 - Math.pow(1 - clamp(x), 3);
+const inCubic = x => { x = clamp(x); return x * x * x; };
+const inQuad = x => { x = clamp(x); return x * x; };
+const outBack = x => { x = clamp(x); const c1 = 2.2, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+const money = (v, d = 2) => '$' + v.toFixed(d);
+
+function setFont(size, o = {}) {
+  if (o.mono) { ctx.font = `${o.weight || 500} ${size}px "JetBrains Mono"`; ctx.letterSpacing = (o.ls ?? 0) + 'px'; }
+  else { ctx.font = `${o.weight || 800} ${size}px DM`; ctx.letterSpacing = (o.ls ?? -size * 0.035) + 'px'; }
+}
+function measure(s, size, o = {}) { ctx.save(); setFont(size, o); const w = ctx.measureText(s).width; ctx.restore(); return w; }
+function txt(s, x, y, o = {}) {
+  ctx.save();
+  setFont(o.size || 60, o);
+  ctx.textAlign = o.align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  ctx.fillStyle = o.color || C.ink;
+  ctx.fillText(s, x, y);
+  ctx.restore();
+}
+// snappy entrance: appears on its cue, overshoots, settles in ~0.16 s
+function slam(t, t0, cx, cy, fn, amt = 0.2, dur = 0.16) {
+  if (t < t0) return;
+  const s = 1 + amt * (1 - outExpo((t - t0) / dur));
+  ctx.save(); ctx.translate(cx, cy); ctx.scale(s, s); ctx.translate(-cx, -cy); fn(); ctx.restore();
+}
+// rich line: parts = [[text, color, marker?]]; draws centred or left-aligned, optional lime marker behind a part
+function line(parts, x, y, size, o = {}) {
+  const ws = parts.map(p => measure(p[0], size, o));
+  const total = ws.reduce((a, b) => a + b, 0);
+  let cx = o.align === 'left' ? x : x - total / 2;
+  parts.forEach((p, i) => {
+    if (p[2]) { ctx.fillStyle = C.lime; ctx.fillRect(cx - size * 0.06, y - size * 0.42, (ws[i] + size * 0.1) * (o.mark ?? 1), size * 0.52); }
+    txt(p[0], cx, y, { ...o, size, align: 'left', color: p[1] });
+    cx += ws[i];
+  });
+  return total;
+}
+function rrect(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function small(lines, x, y, size, color, align = 'center', lh = 1.32) {
+  lines.forEach((l, i) => txt(l, x, y + i * size * lh, { size, weight: 500, ls: 0, color, align }));
+}
+
+// ------------------------------------------------------------------ the ring
+const RING_WORLD = 2.06; // outer diameter in world units
+function ring(cx, cy, dia, o = {}) {
+  const extent = o.extent || 1.35;
+  const S = dia * (2 * extent) / RING_WORLD;
+  if (o.shadow !== false) {
+    const k = o.shadowK ?? 1;
+    ctx.save();
+    ctx.filter = `blur(${Math.round(dia * 0.045)}px)`;
+    ctx.fillStyle = `rgba(20,30,15,${(o.dark ? 0.55 : 0.26) * k})`;
+    ctx.beginPath(); ctx.ellipse(cx + dia * 0.03, (o.floorY ?? cy + dia * 0.6), dia * 0.36 * (0.6 + 0.4 * k), dia * 0.05, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  const g = Ring3D.draw({ ...o, extent });
+  ctx.drawImage(g, cx - S / 2, cy - S / 2 + (o.dy || 0), S, S);
+}
+const idle = (t, a = 1) => ({ ry: 0.42 + 0.12 * a * Math.sin(t * 1.5), rx: -0.12 + 0.05 * a * Math.sin(t * 1.1 + 1) });
+
+function studioBg(color = C.off) {
+  ctx.fillStyle = color; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createRadialGradient(W / 2, H * 0.4, 0, W / 2, H * 0.4, Math.max(W, H) * 0.75);
+  if (color === C.off) { g.addColorStop(0, 'rgba(255,255,255,.9)'); g.addColorStop(1, 'rgba(226,230,218,.9)'); }
+  else { g.addColorStop(0, 'rgba(70,92,58,.55)'); g.addColorStop(1, 'rgba(14,20,11,.75)'); }
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+
+// ------------------------------------------------------------------ S1 0-4  THE HOOK
+const N_T = [0.5, 1.0, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0, 3.083, 3.167, 3.25, 3.333, 3.417, 3.5, 3.583, 3.667, 3.75];
+const SLOTS = V(9, 7);
+const CARD = V({ w: 864, h: 150, gap: 16, y0: 215, f: 1 }, { w: 900, h: 110, gap: 14, y0: 112, f: 0.78 });
+function cardRect(i) {
+  if (i < SLOTS) return { x: W / 2 - CARD.w / 2, y: CARD.y0 + i * (CARD.h + CARD.gap), rot: 0, s: 1 };
+  const k = i - SLOTS;
+  return { x: W / 2 - CARD.w / 2 + (hash(k * 3.1) - 0.5) * W * 0.16, y: CARD.y0 + hash(k * 7.7 + 2) * (H - CARD.y0 * 2 - CARD.h), rot: (hash(k * 5.3 + 1) - 0.5) * 0.22, s: 1.08 };
+}
+function noteCard(i, t, redness, alpha = 1) {
+  const t0 = N_T[i];
+  if (t < t0) return;
+  const r = cardRect(i), f = CARD.f;
+  const k = t - t0;
+  const e = outBack(k / 0.16);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(r.x + CARD.w / 2, r.y + CARD.h / 2 - (1 - e) * 70);
+  ctx.rotate(r.rot); ctx.scale(r.s * lerp(0.9, 1, e), r.s * lerp(0.9, 1, e));
+  ctx.translate(-CARD.w / 2, -CARD.h / 2);
+  const mix = (a, b) => `rgb(${a.map((v, j) => Math.round(lerp(v, b[j], redness))).join(',')})`;
+  ctx.shadowColor = 'rgba(0,0,0,.45)'; ctx.shadowBlur = 30; ctx.shadowOffsetY = 12;
+  rrect(0, 0, CARD.w, CARD.h, 30 * f, mix([40, 50, 36], [229, 72, 77]));
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  rrect(0, 0, CARD.w, CARD.h, 30 * f, null, k < 0.1 ? '#fff' : mix([70, 84, 64], [245, 120, 124]), k < 0.1 ? 5 : 2);
+  // icon: a little payment card
+  const ih = CARD.h - 52 * f;
+  rrect(26 * f, 26 * f, ih, ih, 20 * f, mix([24, 32, 21], [185, 51, 58]));
+  rrect(26 * f + ih * 0.2, 26 * f + ih * 0.3, ih * 0.6, ih * 0.4, 6 * f, null, '#F5F6F1', 4 * f);
+  ctx.fillStyle = '#F5F6F1'; ctx.fillRect(26 * f + ih * 0.2, 26 * f + ih * 0.42, ih * 0.6, 5 * f);
+  const tx = 26 * f + ih + 26 * f;
+  txt(i % 2 ? 'Other AI subscription' : 'AI subscription', tx, CARD.h * 0.47, { size: 38 * f, weight: 700, ls: -0.8, color: '#F5F6F1' });
+  txt('Monthly charge', tx, CARD.h * 0.47 + 40 * f, { size: 27 * f, weight: 500, ls: 0, color: '#F5F6F1', alpha: 0.6 });
+  txt('−$' + CFG.subscriptionCharge, CARD.w - 32 * f, CARD.h * 0.6, { size: 48 * f, weight: 800, color: '#F5F6F1', align: 'right' });
+  ctx.restore();
+}
+function sHook(t) {
+  const red = t >= 3.0;
+  ctx.fillStyle = red ? C.red : '#0C110A'; ctx.fillRect(0, 0, W, H);
+  if (!red) { const g = ctx.createRadialGradient(W / 2, H * 0.3, 0, W / 2, H * 0.3, H * 0.8); g.addColorStop(0, 'rgba(46,60,40,.8)'); g.addColorStop(1, 'rgba(12,17,10,0)'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); }
+  const redness = red ? 1 : inQuad(pr(t, 2.0, 3.0)) * 0.85;
+  // the pile jitters harder as it grows
+  const sh = t > 2.0 && !red ? 6 * pr(t, 2.0, 3.0) : 0;
+  ctx.save(); ctx.translate((hash(t * 91) - 0.5) * sh, (hash(t * 57) - 0.5) * sh);
+  for (let i = 0; i < N_T.length; i++) noteCard(i, t, redness, red ? 0.3 : 1);
+  ctx.restore();
+  if (red) {
+    ctx.fillStyle = 'rgba(229,72,77,.5)'; ctx.fillRect(0, 0, W, H);
+    slam(t, 3.0, W / 2, H / 2, () => {
+      if (PORT) { ["You're", 'overpaying', 'for AI.'].forEach((l, i) => txt(l, W / 2, 830 + i * 158, { size: 156, color: '#fff', align: 'center' })); }
+      else { ["You're overpaying", 'for AI.'].forEach((l, i) => txt(l, W / 2, 510 + i * 170, { size: 164, color: '#fff', align: 'center' })); }
+    }, 0.28);
+  }
+}
+
+// ------------------------------------------------------------------ S2 4-8  THE SWITCH
+const SHARDS = [];
+for (let i = 0; i < SLOTS; i++) for (let j = 0; j < 7; j++) {
+  const r = cardRect(i), n = i * 7 + j;
+  const x = r.x + (j + 0.5) * CARD.w / 7, y = r.y + CARD.h / 2;
+  const a = Math.atan2(y - H / 2, x - W / 2) + (hash(n) - 0.5) * 1.2;
+  SHARDS.push({ x, y, vx: Math.cos(a) * (900 + hash(n + 1) * 1900), vy: Math.sin(a) * (900 + hash(n + 2) * 1900) - 500, w: CARD.w / 7 * (0.6 + hash(n + 3) * 0.6), h: CARD.h * (0.5 + hash(n + 4) * 0.6), rot: (hash(n + 5) - 0.5) * 14, sk: hash(n + 6) });
+}
+const RING2 = V({ x: 540, y: 700, d: 600 }, { x: 520, y: 520, d: 560 });
+function sSwitch(t) {
+  const k5 = t - 5.0;
+  const shake = k5 >= 0 ? 16 * Math.exp(-k5 * 16) : 0;
+  ctx.save(); ctx.translate((hash(t * 133) - 0.5) * shake, (hash(t * 171) - 0.5) * shake * 1.6);
+  studioBg(C.off);
+  // the red stack, shattered
+  const k = t - 4.0;
+  if (k < 1.0) for (const s of SHARDS) {
+    const x = s.x + s.vx * k, y = s.y + s.vy * k + 2600 * k * k;
+    if (x < -300 || x > W + 300 || y > H + 300 || y < -300) continue;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(s.rot * k);
+    ctx.fillStyle = s.sk > 0.5 ? C.red : C.redDark;
+    ctx.beginPath(); ctx.moveTo(-s.w / 2, -s.h / 2); ctx.lineTo(s.w / 2, -s.h / 2 * s.sk); ctx.lineTo(s.w / 2 * s.sk, s.h / 2); ctx.lineTo(-s.w / 2 * (1 - s.sk * 0.5), s.h / 2 * 0.8); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  // ring: drops in spinning, lands on the beat at 5.0 with a heavy stop
+  const R = RING2;
+  if (t >= 4.25) {
+    const fall = pr(t, 4.25, 5.0);
+    const y = lerp(R.y - H * 0.95, R.y, inQuad(fall));
+    const spin = Math.pow(1 - fall, 1.8) * Math.PI * 7;
+    let sy = 1, hop = 0;
+    if (k5 >= 0) { sy = 1 - 0.16 * Math.exp(-k5 * 10) * Math.cos(k5 * 26); hop = -46 * Math.abs(Math.sin(k5 * 10)) * Math.exp(-k5 * 7); }
+    const settle = k5 >= 0 ? 0.3 * Math.exp(-k5 * 6) * Math.sin(k5 * 14) : 0;
+    const id = idle(t, pr(t, 5.6, 6.6));
+    ring(R.x, y + hop + (1 - sy) * R.d * 0.5, R.d, { ry: id.ry + spin + settle, rx: id.rx + (1 - fall) * 0.5, rz: (1 - fall) * 0.4, sy, sx: 1 + (1 - sy) * 0.5, floorY: R.y + R.d * 0.6, shadowK: inQuad(fall) });
+    if (k5 >= 0 && k5 < 0.34) { // landing ring on the floor
+      const p = outCubic(k5 / 0.34);
+      ctx.save(); ctx.strokeStyle = C.forest; ctx.globalAlpha = 0.5; ctx.lineWidth = 7 * (1 - p);
+      ctx.beginPath(); ctx.ellipse(R.x, R.y + R.d * 0.6, R.d * (0.3 + 0.5 * p), R.d * (0.04 + 0.07 * p), 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+    }
+  }
+  const tx = V(540, 1300), ty = V(1300, 510);
+  slam(t, 6.0, tx, ty - 70, () => {
+    const size = V(214, 204);
+    const w = measure('OPTIMA', size);
+    ctx.fillStyle = C.lime; ctx.fillRect(tx - w / 2 - 14, ty - size * 0.36, (w + 28) * outExpo(pr(t, 6.0, 6.2)), size * 0.42);
+    txt('OPTIMA', tx, ty, { size, align: 'center', color: C.forest });
+  }, 0.3);
+  slam(t, 7.0, tx, ty + 120, () => line([['The ', C.forest], ['cheaper', C.forest, 1], [' way to use AI.', C.forest]], tx, ty + V(132, 124), V(64, 58), { weight: 700, ls: -2 }), 0.14);
+  ctx.restore();
+}
+
+// ------------------------------------------------------------------ S3a 8-11  THE PROOF: bars
+function sBars(t) {
+  const half = W / 2;
+  ctx.fillStyle = C.off; ctx.fillRect(0, 0, half, H);
+  ctx.fillStyle = C.forest; ctx.fillRect(half, 0, half, H);
+  const L = V({ bx: 120, bw: 380, cx: 310, yT: 430, yN: 780, sT: 124, sN: 86, lime: { x: 590, w: 380, h: 150 }, cxR: 780 },
+              { bx: 250, bw: 460, cx: 480, yT: 270, yN: 540, sT: 130, sN: 104, lime: { x: 1210, w: 460, h: 104 }, cxR: 1440 });
+  // Them: a tall red bar that runs to the top of the frame
+  const g = outCubic(pr(t, 8.0, 9.5));
+  const bh = (H + 20) * g;
+  const amount = Number(CFG.annualSpend) * outCubic(pr(t, 8.0, 9.5));
+  const leftText = (white) => {
+    txt('Them', L.cx, L.yT, { size: L.sT, align: 'center', color: white ? '#fff' : C.red });
+    txt(money(amount), L.cx, L.yN, { size: L.sN, align: 'center', color: white ? '#fff' : C.red });
+    txt('a year', L.cx, L.yN + V(64, 66), { size: V(46, 48), weight: 700, ls: -1, align: 'center', color: white ? '#fff' : C.red });
+    txt(`at $${CFG.monthlySpend} a month`, L.cx, L.yN + V(118, 120), { size: V(32, 34), weight: 500, ls: 0, align: 'center', color: white ? '#fff' : C.red, alpha: 0.85 });
+    txt('Flat fee. Used or not.', L.cx, V(1610, 900), { size: V(34, 38), weight: 700, ls: -0.5, align: 'center', color: white ? '#fff' : C.red });
+  };
+  leftText(false);
+  ctx.fillStyle = C.red; ctx.fillRect(L.bx, H - bh, L.bw, bh);
+  ctx.save(); ctx.beginPath(); ctx.rect(L.bx, H - bh, L.bw, bh); ctx.clip(); leftText(true); ctx.restore();
+  // Optima: a tiny lime bar that barely gets up
+  txt('Optima', L.cxR, L.yT, { size: L.sT, align: 'center', color: C.lime });
+  if (t >= 8.5) {
+    const e = outBack((t - 8.5) / 0.22);
+    ctx.fillStyle = C.lime; ctx.fillRect(L.lime.x, H - L.lime.h * e, L.lime.w, L.lime.h * e + 4);
+  }
+  slam(t, 9.0, L.cxR, L.yN, () => {
+    txt('Pay per use.', L.cxR, L.yN - V(8, 0), { size: V(70, 86), align: 'center', color: C.off });
+    txt('Only what you use.', L.cxR, L.yN + V(58, 66), { size: V(38, 44), weight: 600, ls: -0.5, align: 'center', color: C.off, alpha: 0.7 });
+  }, 0.16);
+  if (t >= 9.5) small(V(['Illustration: a flat monthly fee', 'next to paying per use.'], ['Illustration: a flat monthly fee next to paying per use.']), L.cxR, V(1640, 938), V(25, 25), 'rgba(245,246,241,.62)');
+}
+
+// ------------------------------------------------------------------ S3b 11-14  THE PROOF: receipt
+function sReceipt(t) {
+  studioBg(C.off);
+  const L = V({ rx: 540, ry: 430, d: 400, pw: 620, k: 1, top: 225, tx: 540, ty: 1420, ts: 98, align: 'center', sy: 1612, ss: 25 },
+              { rx: 1400, ry: 215, d: 300, pw: 540, k: 0.86, top: 170, tx: 192, ty: 430, ts: 132, align: 'left', sy: 690, ss: 26 });
+  const k = L.k;
+  const total = L.top + 610 * k;
+  // paper feeds out in printer steps
+  const p = pr(t, 11.0, 12.4), steps = 12;
+  const st = Math.floor(p * steps), fr = p * steps - st;
+  const len = total * Math.min(1, (st + outCubic(clamp(fr * 2.2))) / steps);
+  const px = L.rx - L.pw / 2, slot = L.ry, bottom = slot + len, y0 = bottom - total;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, slot, W, H); ctx.clip();
+  ctx.shadowColor = 'rgba(36,48,31,.22)'; ctx.shadowBlur = 40; ctx.shadowOffsetY = 18;
+  ctx.fillStyle = C.paper;
+  ctx.beginPath(); ctx.moveTo(px, y0); ctx.lineTo(px + L.pw, y0); ctx.lineTo(px + L.pw, bottom);
+  const teeth = 24; for (let i = teeth; i >= 0; i--) ctx.lineTo(px + L.pw * i / teeth, bottom + (i % 2 ? 12 * k : 0));
+  ctx.closePath(); ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  const cx = L.rx, lx = px + 44 * k, rx = px + L.pw - 44 * k;
+  const Y = v => y0 + L.top + v * k;
+  const dash = v => { ctx.save(); ctx.strokeStyle = 'rgba(36,48,31,.35)'; ctx.lineWidth = 2; ctx.setLineDash([8, 8]); ctx.beginPath(); ctx.moveTo(lx, Y(v)); ctx.lineTo(rx, Y(v)); ctx.stroke(); ctx.restore(); };
+  const row = (v, a, b, bold) => { txt(a, lx, Y(v), { size: 27 * k, mono: true, weight: bold ? 700 : 500 }); txt(b, rx, Y(v), { size: 27 * k, mono: true, weight: 700, align: 'right' }); };
+  txt('OPTIMA  ·  COST PLANNER', cx, Y(30), { size: 25 * k, mono: true, weight: 700, ls: 2, align: 'center' });
+  dash(62);
+  row(118, 'Monthly spend', '$' + CFG.monthlySpend);
+  row(166, 'Messages per day', CFG.messagesPerDay);
+  dash(200);
+  txt('To beat your bill, pay less than', cx, Y(256), { size: 27 * k, weight: 600, ls: -0.4, align: 'center' });
+  const be = Number(CFG.breakEven) * (t < 12.0 ? 0 : outCubic(pr(t, 12.0, 12.45)));
+  txt(money(be, 4), cx, Y(378), { size: 132 * k, align: 'center' });
+  txt('per message, on average', cx, Y(424), { size: 27 * k, weight: 600, ls: -0.4, align: 'center' });
+  dash(458);
+  if (CFG.pricePerAnswer) row(512, '1 answer', '$' + CFG.pricePerAnswer, true);
+  else row(512, 'Annual spend', '$' + CFG.annualSpend, true);
+  for (let i = 0; i < 34; i++) { ctx.fillStyle = C.ink; ctx.fillRect(lx + i * (rx - lx) / 34, Y(546), (1 + Math.floor(hash(i) * 4)) * 2.2 * k, 36 * k); }
+  ctx.restore();
+  ring(L.rx, L.ry, L.d, { ...idle(t), shadow: false });
+  // copy
+  const second = CFG.savingsPercent ? [['Up to ', C.forest], [CFG.savingsPercent + '% less.', C.forest, 1]] : [['Pay ', C.forest], ['per use.', C.forest, 1]];
+  const ax = L.tx;
+  slam(t, 12.5, PORT ? ax : ax + 400, L.ty, () => line([['Same question.', C.forest]], ax, L.ty, L.ts, { align: L.align }), 0.16);
+  slam(t, 13.0, PORT ? ax : ax + 400, L.ty + L.ts, () => line(second, ax, L.ty + L.ts * 1.12, L.ts, { align: L.align }), 0.16);
+  if (t >= 13.0) {
+    const lines = CFG.savingsPercent
+      ? [`${CFG.whatIsCompared}, prices checked ${CFG.pricesCheckedDate}`]
+      : V([`Cost-planner math from ${CFG.domain}: $${CFG.monthlySpend} a month,`, `${CFG.messagesPerDay} messages a day, 30-day month.`, 'A budget calculation, not an Optima quote.'],
+          [`Cost-planner math from ${CFG.domain}: $${CFG.monthlySpend} a month,`, `${CFG.messagesPerDay} messages a day, 30-day month.`, 'A budget calculation, not an Optima quote.']);
+    small(lines, ax, L.sy, L.ss, C.mute, L.align);
+  }
+}
+
+// ------------------------------------------------------------------ S4 14-18  HOW
+const RING4 = V({ x: 540, y: 790, d: 600 }, { x: 960, y: 470, d: 500 });
+function routeLine(color, hi) {
+  if (PORT) ['Every task goes to', 'the cheapest model', 'that can do it.'].forEach((l, i) => {
+    if (i === 1) line([['the ', color], ['cheapest', hi === 'mark' ? color : C.lime, hi === 'mark'], [' model', color]], 540, 1490 + i * 82, 70);
+    else txt(l, 540, 1490 + i * 82, { size: 70, align: 'center', color });
+  });
+  else line([['Every task goes to the ', color], ['cheapest', hi === 'mark' ? color : C.lime, hi === 'mark'], [' model that can do it.', color]], 960, 945, 57);
+}
+function sRouteIn(t) { // 14-15: one prompt goes into the ring
+  studioBg(C.forest);
+  const R = RING4;
+  ring(R.x, R.y, R.d, { ...idle(t), dark: true });
+  slam(t, 14.0, R.x, V(330, 130), () => txt('One prompt in.', R.x, V(350, 150), { size: V(84, 78), align: 'center', color: C.off }), 0.18);
+  const p = inCubic(pr(t, 14.15, 14.85));
+  if (t >= 14.1 && t < 14.85) {
+    const sx = V(-120, 60), sy = V(1420, 900);
+    const x = lerp(sx, R.x, p) + (PORT ? 330 * (1 - p) : 300 * (1 - p)), y = lerp(sy, R.y, p), s = lerp(1, 0.12, p);
+    const label = 'Summarise this report.';
+    const w = measure(label, 42, { weight: 700, ls: -0.8 }) + 76;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(-0.2 * (1 - p)); ctx.scale(s, s);
+    ctx.shadowColor = 'rgba(197,245,106,.9)'; ctx.shadowBlur = 50;
+    rrect(-w / 2, -44, w, 88, 44, C.lime);
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    txt(label, 0, 14, { size: 42, weight: 700, ls: -0.8, align: 'center', color: C.forest });
+    ctx.restore();
+  }
+  if (t >= 14.85) { // swallowed: a lime pulse in the hole
+    const q = pr(t, 14.85, 15.0);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = `rgba(197,245,106,${0.8 * (1 - q)})`;
+    ctx.beginPath(); ctx.arc(R.x, R.y, R.d * (0.12 + 0.3 * q), 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  }
+}
+function sDoors(t) { // 15-17: inside, three doors, takes the smallest that fits
+  ctx.fillStyle = C.deep; ctx.fillRect(0, 0, W, H);
+  const D = V({ floor: 1180, w: [300, 250, 200], h: [620, 440, 290], gap: 34, fs: 28 }, { floor: 700, w: [400, 320, 240], h: [500, 370, 250], gap: 64, fs: 30 });
+  const totalW = D.w.reduce((a, b) => a + b, 0) + D.gap * 2;
+  let x = W / 2 - totalW / 2;
+  const cxs = [];
+  const names = ['Team or Swarm', 'More capable model', 'Lower-cost route'];
+  const quips = ['Overkill.', 'Still overkill.', 'Fits.'];
+  const hitT = [15.4, 15.9, 16.3];
+  // floor line
+  ctx.strokeStyle = 'rgba(245,246,241,.25)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(W * 0.06, D.floor); ctx.lineTo(W * 0.94, D.floor); ctx.stroke();
+  for (let i = 0; i < 3; i++) {
+    const w = D.w[i], h = D.h[i], cx = x + w / 2; cxs.push(cx);
+    const passed = t >= hitT[i];
+    const win = i === 2 && passed;
+    ctx.save();
+    if (win) { const e = outBack((t - hitT[2]) / 0.2); ctx.translate(cx, D.floor); ctx.scale(lerp(0.9, 1, e), lerp(0.9, 1, e)); ctx.translate(-cx, -D.floor); ctx.shadowColor = 'rgba(197,245,106,.8)'; ctx.shadowBlur = 60; }
+    ctx.beginPath(); ctx.roundRect(x, D.floor - h, w, h, [w * 0.5, w * 0.5, 0, 0]);
+    ctx.fillStyle = win ? C.lime : 'rgba(245,246,241,.05)'; ctx.fill();
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    ctx.lineWidth = 5; ctx.strokeStyle = win ? C.lime : passed ? C.red : 'rgba(245,246,241,.4)'; ctx.stroke();
+    ctx.restore();
+    // price tier and name under the door
+    txt('$'.repeat(3 - i), cx, D.floor + 62, { size: D.fs * 1.5, mono: true, weight: 700, align: 'center', color: win ? C.lime : passed ? C.red : C.off });
+    const nm = names[i].split(' ');
+    const l1 = PORT && nm.length > 2 ? nm.slice(0, -1).join(' ') : names[i], l2 = PORT && nm.length > 2 ? nm[nm.length - 1] : '';
+    txt(l1, cx, D.floor + 62 + D.fs * 1.45, { size: D.fs, weight: 600, ls: -0.4, align: 'center', color: C.off, alpha: 0.8 });
+    if (l2) txt(l2, cx, D.floor + 62 + D.fs * 2.6, { size: D.fs, weight: 600, ls: -0.4, align: 'center', color: C.off, alpha: 0.8 });
+    // quip over the door as the prompt passes it
+    slam(t, hitT[i], cx, D.floor - h - 40, () => txt(quips[i], cx, D.floor - h - 28, { size: V(44, 50), align: 'center', color: i === 2 ? C.lime : C.red }), 0.3);
+    x += w + D.gap;
+  }
+  // the prompt: a glowing lime orb that walks the row
+  const oy = D.floor - 64;
+  let ox, os = 1;
+  if (t < 15.4) ox = lerp(-60, cxs[0], outCubic(pr(t, 15.0, 15.36)));
+  else if (t < 15.9) ox = lerp(cxs[0], cxs[1], outCubic(pr(t, 15.5, 15.86)));
+  else { ox = lerp(cxs[1], cxs[2], outCubic(pr(t, 16.0, 16.28))); os = 1 - inCubic(pr(t, 16.3, 16.45)); }
+  if (os > 0.02) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (let s = 5; s >= 0; s--) { ctx.fillStyle = `rgba(197,245,106,${s === 0 ? 1 : 0.1})`; ctx.beginPath(); ctx.arc(ox, oy, (28 + s * 16) * os, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  routeLine(C.off, 'lime');
+}
+function sRouteOut(t) { // 17-18: out the other side as a finished answer
+  studioBg(C.off);
+  const R = RING4;
+  ring(R.x, R.y, R.d, idle(t));
+  const e = outBack(pr(t, 17.0, 17.24));
+  const cw = V(640, 560), ch = V(300, 290);
+  const tx = V(540, 1420), ty = V(1180, 470);
+  const x = lerp(R.x, tx, e), y = lerp(R.y, ty, e), s = lerp(0.15, 1, e);
+  ctx.save(); ctx.translate(x, y); ctx.rotate(0.03 * (1 - e) * 6 - 0.025); ctx.scale(s, s);
+  ctx.shadowColor = 'rgba(36,48,31,.28)'; ctx.shadowBlur = 50; ctx.shadowOffsetY = 22;
+  rrect(-cw / 2, -ch / 2, cw, ch, 30, C.paper);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.fillStyle = C.lime; ctx.beginPath(); ctx.arc(-cw / 2 + 74, -ch / 2 + 78, 34, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = C.forest; ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(-cw / 2 + 59, -ch / 2 + 79); ctx.lineTo(-cw / 2 + 70, -ch / 2 + 91); ctx.lineTo(-cw / 2 + 90, -ch / 2 + 66); ctx.stroke();
+  txt('Summary ready.', -cw / 2 + 128, -ch / 2 + 96, { size: 50, color: C.forest });
+  [0.86, 0.94, 0.6].forEach((f, i) => rrect(-cw / 2 + 42, -ch / 2 + 146 + i * 30, (cw - 84) * f, 14, 7, '#E3E7DC'));
+  const chip = 'Lower-cost route';
+  const w = measure(chip, 26, { weight: 700, ls: -0.3 }) + 44;
+  rrect(-cw / 2 + 42, ch / 2 - 70, w, 46, 23, C.lime);
+  txt(chip, -cw / 2 + 64, ch / 2 - 38, { size: 26, weight: 700, ls: -0.3, color: C.forest });
+  txt('Usage receipt', cw / 2 - 42, ch / 2 - 38, { size: 24, weight: 600, ls: 0, color: C.mute, align: 'right' });
+  ctx.restore();
+  routeLine(C.forest, 'mark');
+}
+
+// ------------------------------------------------------------------ S5 18-24  THE REWARDS
+const TOKENS = Array.from({ length: 16 }, (_, i) => ({ x: 0.08 + 0.84 * hash(i * 3.3 + 1), ph: hash(i * 5.1 + 2), sp: 0.3 + 0.16 * hash(i * 2.7), r: 16 + 14 * hash(i * 9.1) }));
+function embers(t) {
+  for (const [i, k] of TOKENS.entries()) {
+    const u = ((t - 18) * k.sp + k.ph) % 1; // 0 bottom -> 1 top
+    const x = k.x * W + Math.sin(t * 1.3 + i) * 26, y = H * (1.06 - u * 0.95);
+    if (u < 0.55) { // token: a small lime ring
+      ctx.save(); ctx.globalAlpha = 0.2; ctx.strokeStyle = C.lime; ctx.lineWidth = k.r * 0.42;
+      ctx.beginPath(); ctx.arc(x, y, k.r, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+    } else { // burns away into embers
+      const b = (u - 0.55) / 0.45;
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      for (let j = 0; j < 9; j++) {
+        const a = hash(i * 11 + j) * Math.PI * 2, d = b * (40 + 90 * hash(i * 13 + j));
+        const ex = x + Math.cos(a) * d, ey = y - b * 150 * hash(i * 17 + j) + Math.sin(a) * d * 0.5;
+        const r = (5 + 5 * hash(i + j * 3)) * (1 - b);
+        ctx.fillStyle = j % 3 ? 'rgba(197,245,106,.85)' : 'rgba(240,255,200,.95)';
+        ctx.beginPath(); ctx.arc(ex, ey, r, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+}
+function sRewards(t) {
+  studioBg(C.forest);
+  embers(t);
+  const R = V({ x: 540, y: 610, u: 212 }, { x: 540, y: 500, u: 196 });
+  const dia = R.u * RING_WORLD;
+  const a0 = Math.PI * (t - 18); // one orbit every 2 s; a coin crosses the front every 1 s
+  ring(R.x, R.y, dia, { ...idle(t, 0.6), extent: 2.4, dark: true, coins: [{ a: a0, r: 1.62 }, { a: a0 + Math.PI, r: 1.62 }] });
+  // "+" tally: one more each time a coin passes the front of the ring
+  const passes = Math.floor(t - 18 + 1e-6);
+  const py = R.y - dia * 0.5 - V(120, 104);
+  for (let i = 0; i < passes; i++) {
+    const tp = 19 + i, k = t - tp;
+    const s = 1 + 0.9 * (1 - outExpo(k / 0.18));
+    const x = R.x + (i - (passes - 1) / 2) * V(74, 64);
+    ctx.save(); ctx.translate(x, py); ctx.scale(s, s);
+    txt('+', 0, 26, { size: V(92, 80), align: 'center', color: C.lime });
+    ctx.restore();
+  }
+  const X = V(118, 1070), Y = V([1140, 1318, 1492], [330, 530, 706]);
+  slam(t, 18.5, V(540, X + 300), Y[0] - 30, () => line([['Use it. Hold ', C.off], [TICK + '.', C.lime]], X, Y[0], V(77, 72), { align: 'left' }), 0.16);
+  const big = V(168, 156), ls = V(42, 42);
+  const rowN = (t0, y, pct, l1, l2) => slam(t, t0, V(540, X + 300), y - 50, () => {
+    const n = Math.round(Number(pct) * outCubic(pr(t, t0, t0 + 0.35)));
+    txt(n + '%', X - 6, y, { size: big, color: C.lime });
+    const lx = X + measure(pct + '%', big) + 26;
+    txt(l1, lx, y - ls * 1.32, { size: ls, weight: 700, ls: -1, color: C.off });
+    txt(l2, lx, y - ls * 0.12, { size: ls, weight: 700, ls: -1, color: C.off });
+  }, 0.16);
+  rowN(20.0, Y[1], CFG.rewardsPercent, 'of fees to holder', '& user rewards');
+  rowN(21.5, Y[2], CFG.burnPercent, 'of fees to buyback', '& burn');
+  if (t >= 22.0) small(['Share of distributable protocol fees.', 'Fee design: rewards are not active yet.'], X, V(1618, 800), 26, 'rgba(245,246,241,.62)', 'left');
+}
+
+// ------------------------------------------------------------------ S6 24-30  END CARD
+function sEnd(t) {
+  studioBg(C.off);
+  const R = V({ x: 540, y: 600, d: 560 }, { x: 500, y: 520, d: 520 });
+  const k = t - 24;
+  const e = outBack(k / 0.3);
+  const still = 1 - pr(t, 26.5, 27.5); // everything is at rest for the last two seconds
+  const id = idle(t, still);
+  ring(R.x, R.y, R.d * lerp(0.8, 1, e), { ry: id.ry + (1 - outExpo(k / 0.6)) * Math.PI * 2, rx: id.rx });
+  const big = V(152, 134);
+  if (PORT) {
+    slam(t, 24.5, 540, 1130, () => { txt('Stop', 540, 1110, { size: big, align: 'center', color: C.forest }); line([['overpaying.', C.forest, 1]], 540, 1110 + big * 1.0, big); }, 0.22);
+  } else {
+    slam(t, 24.5, 1300, 440, () => { txt('Stop', 880, 400, { size: big, color: C.forest }); line([['overpaying.', C.forest, 1]], 880, 400 + big * 1.02, big, { align: 'left' }); }, 0.22);
+  }
+  const ds = V(62, 60), dw = measure(CFG.domain, ds) + 92, dh = 112;
+  const dx = V(540 - dw / 2, 880), dy = V(1370, 620);
+  slam(t, 25.5, dx + dw / 2, dy + dh / 2, () => { rrect(dx, dy, dw, dh, 26, C.forest); txt(CFG.domain, dx + dw / 2, dy + dh * 0.66, { size: ds, align: 'center', color: C.lime }); }, 0.18);
+  slam(t, 26.5, V(540, 880 + 200), dy + dh + 70, () => {
+    if (CFG.tokenMint) txt('CA: ' + CFG.tokenMint, V(540, 880), dy + dh + V(86, 80), { size: V(25, 26), mono: true, weight: 600, align: V('center', 'left'), color: C.forest });
+    else {
+      const s = V(46, 44), w = measure(TICK, s) + 60;
+      const x = V(540 - w / 2, 880), y = dy + dh + 34;
+      rrect(x, y, w, 80, 40, null, C.forest, 4);
+      txt(TICK, x + w / 2, y + 56, { size: s, align: 'center', color: C.forest });
+    }
+  }, 0.16);
+}
+
+// ------------------------------------------------------------------ frame
+const SHOTS = [[0, sHook], [4, sSwitch], [8, sBars], [11, sReceipt], [14, sRouteIn], [15, sDoors], [17, sRouteOut], [18, sRewards], [24, sEnd]];
+let GRAIN;
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  let idx = 0;
+  for (let i = 0; i < SHOTS.length; i++) if (t >= SHOTS[i][0] - 1e-6) idx = i;
+  const t0 = SHOTS[idx][0], t1 = idx + 1 < SHOTS.length ? SHOTS[idx + 1][0] : DUR;
+  // snappy push on every cut, then a slow creep in; the end card comes to a full stop
+  let z = 1 + 0.05 * (1 - outExpo((t - t0) / 0.22)) + 0.022 * (t - t0) / (t1 - t0);
+  if (idx === SHOTS.length - 1) z = 1 + 0.05 * (1 - outExpo((t - t0) / 0.22)) + 0.012 * outCubic(pr(t, 24, 27.5));
+  if (idx === 0) z = 1 + 0.03 * t / 4;
+  ctx.save();
+  ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-W / 2, -H / 2);
+  SHOTS[idx][1](t);
+  ctx.restore();
+  // fine grain; frozen once the end card is at rest
+  ctx.save();
+  ctx.globalAlpha = 0.035; ctx.globalCompositeOperation = 'overlay';
+  const fr = Math.floor(Math.min(t, 27.5) * 24);
+  const ox = Math.floor(hash(fr) * 384), oy = Math.floor(hash(fr + 0.5) * 384);
+  for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+}
+
+window.ready = (async () => {
+  await Promise.all(['800 100px DM', '700 100px DM', '600 100px DM', '500 100px DM', '500 30px "JetBrains Mono"', '700 30px "JetBrains Mono"'].map(f => document.fonts.load(f)));
+  await Ring3D.init();
+  GRAIN = document.createElement('canvas'); GRAIN.width = GRAIN.height = 384;
+  const g = GRAIN.getContext('2d'); const id = g.createImageData(384, 384);
+  for (let i = 0; i < id.data.length; i += 4) { const v = Math.floor(hash(i * 0.37) * 255); id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0);
+  return true;
+})();
+window.render = render;
+window.DUR = DUR;
+</script>
+</body>
+</html>

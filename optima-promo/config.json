@@ -1,0 +1,18 @@
+{
+  "domain": "UseOptima.fun",
+  "ticker": "OPTIMA",
+  "tokenMint": "",
+
+  "subscriptionCharge": "20.00",
+  "monthlySpend": "40.00",
+  "messagesPerDay": "30",
+  "breakEven": "0.0444",
+  "annualSpend": "480.00",
+  "rewardsPercent": "75",
+  "burnPercent": "15",
+
+  "pricePerAnswer": "",
+  "savingsPercent": "",
+  "whatIsCompared": "",
+  "pricesCheckedDate": ""
+}
