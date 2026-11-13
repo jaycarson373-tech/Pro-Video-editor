@@ -21,7 +21,7 @@ Everything is generated from code. The ring is a real 3D object (three.js, studi
 Every number on screen comes from `config.json`, and the values there match UseOptima.fun as of 13 November 2026:
 
 - Cost planner defaults: $40.00 a month, 30 messages a day, break-even $0.0444 per message, $480.00 a year.
-- Fee design: 75% holder and user rewards, 15% buyback and burn.
+- Fee design: 75% holder and user rewards, 15% buyback and burn, 10% treasury.
 
 The brief asked for a price per answer, a savings percentage and a contract address. The site publishes none of these yet: it says there is no rate card, that it does not claim Optima is cheaper, that rewards are not active, and that the token mint is awaiting verification. So Scene 3 uses the cost-planner math and "Pay per use." instead of "Up to X% less", Scene 5 says the rewards are a fee design that is not active yet, and the end card shows `$OPTIMA` instead of a contract address.
 

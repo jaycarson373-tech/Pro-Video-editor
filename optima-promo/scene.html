@@ -446,7 +446,7 @@ function sRewards(t) {
     txt('+', 0, 26, { size: V(92, 80), align: 'center', color: C.lime });
     ctx.restore();
   }
-  const X = V(118, 1070), Y = V([1140, 1318, 1492], [330, 530, 706]);
+  const X = V(118, 1070), Y = V([1010, 1184, 1344, 1504], [250, 432, 592, 752]);
   slam(t, 18.5, V(540, X + 300), Y[0] - 30, () => line([['Use it. Hold ', C.off], [TICK + '.', C.lime]], X, Y[0], V(77, 72), { align: 'left' }), 0.16);
   const big = V(168, 156), ls = V(42, 42);
   const rowN = (t0, y, pct, l1, l2) => slam(t, t0, V(540, X + 300), y - 50, () => {
@@ -458,7 +458,8 @@ function sRewards(t) {
   }, 0.16);
   rowN(20.0, Y[1], CFG.rewardsPercent, 'of fees to holder', '& user rewards');
   rowN(21.5, Y[2], CFG.burnPercent, 'of fees to buyback', '& burn');
-  if (t >= 22.0) small(['Share of distributable protocol fees.', 'Fee design: rewards are not active yet.'], X, V(1618, 800), 26, 'rgba(245,246,241,.62)', 'left');
+  rowN(22.5, Y[3], CFG.treasuryPercent, 'of fees to', 'the treasury');
+  if (t >= 22.0) small(['Share of distributable protocol fees.', 'Fee design: rewards are not active yet.'], X, V(1618, 846), 26, 'rgba(245,246,241,.62)', 'left');
 }
 
 // ------------------------------------------------------------------ S6 24-30  END CARD

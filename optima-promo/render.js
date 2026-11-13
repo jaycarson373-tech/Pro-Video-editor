@@ -2,6 +2,7 @@
 //   node render.js v                  -> out/frames-v/f00000.jpg ...   (9:16, 1080x1920)
 //   node render.js h                  -> out/frames-h/f00000.jpg ...   (16:9, 1920x1080)
 //   node render.js v --at 3.2 9.0     -> out/preview/v-t3.20.png ...   (single frames for review)
+//   node render.js v --range 18 24    -> re-render only seconds 18-24 into the existing frames
 const { chromium } = require('playwright');
 const fs = require('fs');
 const http = require('http');
@@ -75,13 +76,14 @@ async function grabRetry(state, open, t, type) {
     }
   } else {
     const dir = path.join(root, `out/frames-${fmt}`);
-    fs.rmSync(dir, { recursive: true, force: true });
+    const rg = args.indexOf('--range'); // --range 18 24 re-renders only those seconds into the existing frames
+    if (rg < 0) fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true });
     const probe = await openPage(browser, url, fmt);
     const dur = await probe.evaluate(() => window.DUR);
     await probe.close();
-    const total = Math.round(dur * FPS);
-    let next = 0, done = 0;
+    const total = rg < 0 ? Math.round(dur * FPS) : Math.round(Number(args[rg + 2]) * FPS);
+    let next = rg < 0 ? 0 : Math.round(Number(args[rg + 1]) * FPS), done = 0;
     const t0 = Date.now();
     await Promise.all(Array.from({ length: WORKERS }, async () => {
       const open = () => openPage(browser, url, fmt);
