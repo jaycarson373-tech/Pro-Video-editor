@@ -1,0 +1,315 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Liquid Ponzi promo scene</title>
+<style>
+  @font-face { font-family: 'Unbounded'; src: url(assets/Unbounded.woff2); font-weight: 200 900; }
+  html, body { margin: 0; background: #000; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// Deterministic, time-driven scene: render(t) draws the frame at t seconds. 1080x1920 (9:16).
+// Beat grid: 150 BPM -> beat 0.4 s, bar 1.6 s (matches music.py).
+const W = 1080, H = 1920, B = 0.4, DUR = 10.4;
+// Liquid Ponzi brand tokens (from liquidponzi.fun)
+const C = { ink: '#100d17', surface: '#191321', line: '#302838', muted: '#afa3bf', violet: '#c7a2ff', violet2: '#8b5cf6', peach: '#f1b6a2', orange: '#ff783f', text: '#f6f1ff' };
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const eOut = x => { x = clamp(x); return x >= 1 ? 1 : 1 - Math.pow(2, -10 * x); };
+const eOut3 = x => 1 - Math.pow(1 - clamp(x), 3);
+const eIn = x => { x = clamp(x); return x * x * x; };
+const eBack = x => { x = clamp(x); const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+function hash(n) { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); }
+function env(t, times, decay) { let v = 0; for (const ti of times) if (t >= ti - 1e-6) v = Math.max(v, Math.exp(-(t - ti) * decay)); return v; }
+const range = (a, b, s) => { const r = []; for (let x = a; x < b - 1e-6; x += s) r.push(+x.toFixed(3)); return r; };
+
+const KICKS = [0, 0.4, 0.8, 1.2, ...range(1.6, 8.0, B), 8.0];
+const BIG = [1.6, 8.0];
+const MED = [0, 0.4, 0.8, 1.2, 3.2, 4.8, 5.6, 6.4, 7.2, 7.6];
+
+function setFont(size, o = {}) {
+  if (o.body) { ctx.font = `${o.weight || 700} ${size}px Inter`; ctx.letterSpacing = (o.ls ?? 0) + 'px'; }
+  else { ctx.font = `${o.weight || 900} ${size}px Unbounded`; ctx.letterSpacing = (o.ls ?? -size * 0.05) + 'px'; }
+}
+function measure(s, size, o = {}) { ctx.save(); setFont(size, o); const w = ctx.measureText(s).width; ctx.restore(); return w; }
+const fit = (s, maxW, maxSize, o = {}) => Math.min(maxSize, maxW / measure(s, 100, o) * 100);
+function grad(x, y, size, w, kind) { // the site's violet -> peach wordmark gradient
+  const g = ctx.createLinearGradient(x - w / 2, y - size, x + w / 2, y);
+  if (kind === 'fire') { g.addColorStop(0, '#ffd27a'); g.addColorStop(0.5, C.orange); g.addColorStop(1, '#ff3d6e'); }
+  else { g.addColorStop(0, C.violet2); g.addColorStop(0.5, C.violet); g.addColorStop(1, C.peach); }
+  return g;
+}
+function txt(s, x, y, o = {}) {
+  const size = o.size || 80;
+  ctx.save();
+  setFont(size, o);
+  ctx.textAlign = o.align || 'center';
+  ctx.globalAlpha *= (o.alpha ?? 1);
+  if (o.chroma && o.chroma > 0.4) {
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = 'rgba(255,120,63,.6)'; ctx.fillText(s, x - o.chroma, y);
+    ctx.fillStyle = 'rgba(139,92,246,.7)'; ctx.fillText(s, x + o.chroma, y);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  if (o.glow) { ctx.shadowColor = o.glowColor || 'rgba(199,162,255,.75)'; ctx.shadowBlur = o.glow; }
+  const w = ctx.measureText(s).width;
+  const cx = o.align === 'left' ? x + w / 2 : x;
+  ctx.fillStyle = o.color === 'lp' || o.color === 'fire' ? grad(cx, y, size, w, o.color) : (o.color || C.text);
+  ctx.fillText(s, x, y);
+  ctx.restore();
+}
+function punch(s, x, y, k, o = {}) {
+  const sc = (1 + (o.from ?? 0.35) * Math.exp(-k * 16)) * (1 + (o.drift ?? 0.03) * k);
+  ctx.save(); ctx.translate(x, y); ctx.scale(sc, sc);
+  txt(s, 0, 0, { ...o, chroma: (o.chroma ?? 20) * Math.exp(-k * 9) });
+  ctx.restore();
+}
+function pop(t, t0, cx, cy, fn, amt = 0.4) {
+  if (t < t0) return;
+  const s = 1 + amt * Math.exp(-(t - t0) * 16);
+  ctx.save(); ctx.translate(cx, cy); ctx.scale(s, s); ctx.translate(-cx, -cy); fn(); ctx.restore();
+}
+function rrect(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function chip(s, cx, cy, size, fill, stroke, color) {
+  const w = measure(s, size, { weight: 800 }) + size * 1.4, h = size * 1.9;
+  rrect(cx - w / 2, cy - h / 2, w, h, h / 2, fill, stroke, 3);
+  txt(s, cx, cy + size * 0.36, { size, weight: 800, ls: 0, color });
+}
+
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; }); }
+let PYR, MARK, GRAIN;
+window.ready = (async () => {
+  [PYR, MARK] = await Promise.all([loadImg('assets/pyramid.png'), loadImg('assets/logo-mark.png')]);
+  await Promise.all(['900 100px Unbounded', '700 100px Unbounded', '700 40px Inter', '600 40px Inter'].map(f => document.fonts.load(f)));
+  GRAIN = document.createElement('canvas'); GRAIN.width = GRAIN.height = 384;
+  const g = GRAIN.getContext('2d'); const id = g.createImageData(384, 384);
+  for (let i = 0; i < id.data.length; i += 4) { const v = Math.floor(hash(i * 0.37) * 255); id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  g.putImageData(id, 0, 0);
+  return true;
+})();
+
+// ------------------------------------------------------------------ layers
+function bg(t, k = 1) {
+  ctx.fillStyle = C.ink; ctx.fillRect(0, 0, W, H);
+  const g1 = ctx.createRadialGradient(W * 0.75, H * 0.32, 0, W * 0.75, H * 0.32, W * 1.0);
+  g1.addColorStop(0, `rgba(139,92,246,${0.42 * k})`); g1.addColorStop(1, 'rgba(16,13,23,0)');
+  ctx.fillStyle = g1; ctx.fillRect(0, 0, W, H);
+  const g2 = ctx.createRadialGradient(W * 0.1, H * 0.9, 0, W * 0.1, H * 0.9, W * 0.9);
+  g2.addColorStop(0, `rgba(255,120,63,${0.3 * k})`); g2.addColorStop(1, 'rgba(16,13,23,0)');
+  ctx.fillStyle = g2; ctx.fillRect(0, 0, W, H);
+  // dot grid like the site
+  ctx.fillStyle = 'rgba(199,162,255,.12)';
+  for (let y = 30; y < H; y += 54) for (let x = 27; x < W; x += 54) ctx.fillRect(x, y, 2.5, 2.5);
+}
+// the pyramid (site artwork) with a liquid level and caustic shimmer drawn over it
+function pyramid(cx, cy, w, t, o = {}) {
+  const h = w * PYR.height / PYR.width;
+  ctx.save();
+  ctx.translate(cx, cy); ctx.scale(o.s || 1, o.s || 1); ctx.rotate(o.rot || 0);
+  ctx.shadowColor = 'rgba(139,92,246,.8)'; ctx.shadowBlur = o.glow ?? 70;
+  ctx.drawImage(PYR, -w / 2, -h / 2, w, h);
+  ctx.shadowBlur = 0;
+  // liquid level rising inside the pyramid (clipped to its silhouette)
+  if (o.fill != null) {
+    const apexX = -w * 0.0, apexY = -h * 0.5 + h * 0.0;
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(apexX, apexY + h * 0.02); ctx.lineTo(w * 0.27, h * 0.27); ctx.lineTo(-w * 0.28, h * 0.29); ctx.closePath(); ctx.clip();
+    const top = lerp(h * 0.3, -h * 0.44, o.fill);
+    ctx.globalCompositeOperation = 'lighter';
+    const lg = ctx.createLinearGradient(0, top, 0, h * 0.3);
+    lg.addColorStop(0, 'rgba(241,182,162,.75)'); lg.addColorStop(0.15, 'rgba(255,120,63,.45)'); lg.addColorStop(1, 'rgba(139,92,246,.25)');
+    ctx.fillStyle = lg;
+    ctx.beginPath(); ctx.moveTo(-w, h);
+    for (let x = -w * 0.4; x <= w * 0.4; x += 8) ctx.lineTo(x, top + Math.sin(x * 0.03 + t * 7) * 9 + Math.sin(x * 0.011 - t * 4) * 6);
+    ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+// drops / coins falling into the apex
+function drop(x, y, r, col) {
+  ctx.save(); ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 20;
+  ctx.beginPath(); ctx.moveTo(x, y - r * 1.6); ctx.bezierCurveTo(x + r, y - r * 0.4, x + r, y + r, x, y + r); ctx.bezierCurveTo(x - r, y + r, x - r, y - r * 0.4, x, y - r * 1.6); ctx.fill();
+  ctx.restore();
+}
+function coin(x, y, r, label, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(Math.max(0.15, Math.abs(Math.cos(rot))), 1);
+  ctx.shadowColor = 'rgba(255,120,63,.8)'; ctx.shadowBlur = 24;
+  const g = ctx.createLinearGradient(-r, -r, r, r); g.addColorStop(0, C.peach); g.addColorStop(1, C.orange);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(16,13,23,.5)'; ctx.lineWidth = r * 0.08; ctx.beginPath(); ctx.arc(0, 0, r * 0.78, 0, Math.PI * 2); ctx.stroke();
+  txt(label, 0, r * 0.2, { size: r * 0.58, weight: 900, ls: -1, color: C.ink });
+  ctx.restore();
+}
+function rings(t, t0, cx, cy, col = C.violet) {
+  const k = t - t0; if (k < 0 || k > 1.1) return;
+  const p = eOut3(k / 1.1);
+  ctx.save(); ctx.globalAlpha = 1 - p; ctx.strokeStyle = col; ctx.lineWidth = 28 * (1 - p) + 1;
+  ctx.beginPath(); ctx.arc(cx, cy, 200 + p * 1200, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+}
+function splash(t, t0, cx, cy, n = 60) {
+  const k = t - t0; if (k < 0 || k > 1.3) return;
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI * (0.1 + 0.8 * hash(i + t0)), sp = 500 + 1300 * hash(i + 3 + t0);
+    const x = cx + Math.cos(a) * sp * k, y = cy + Math.sin(a) * sp * k + 1700 * k * k;
+    ctx.globalAlpha = 1 - k / 1.3;
+    drop(x, y, 8 + 10 * hash(i + 5), i % 3 ? C.violet : C.peach);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ------------------------------------------------------------------ scenes
+function sHook(t) { // 0-1.6  CRYPTO = LIQUID PONZI.
+  bg(t, 0.6 + 0.4 * P(t, 0, 1.6));
+  ctx.save();
+  if (t > 1.4) { const q = eIn(P(t, 1.4, 1.6)); ctx.translate(W / 2, H / 2); ctx.scale(1 + q * 4, 1 + q * 4); ctx.translate(-W / 2, -H / 2); ctx.globalAlpha = 1 - q; }
+  punch('CRYPTO', W / 2, 640, t, { size: fit('CRYPTO', 900, 200), from: 0.45 });
+  if (t >= 0.4) punch('=', W / 2, 880, t - 0.4, { size: 220, color: C.orange, from: 0.6, glow: 40, glowColor: 'rgba(255,120,63,.8)' });
+  if (t >= 0.8) punch('LIQUID', W / 2, 1150, t - 0.8, { size: fit('LIQUID', 900, 210), color: 'lp', from: 0.4 });
+  if (t >= 1.2) punch('PONZI.', W / 2, 1390, t - 1.2, { size: fit('PONZI.', 900, 210), color: 'lp', from: 0.4 });
+  ctx.restore();
+}
+function sPyramid(t) { // 1.6-3.2  the pyramid slams in, wordmark
+  const k = t - 1.6;
+  bg(t);
+  rings(t, 1.6, W / 2, 820);
+  splash(t, 1.6, W / 2, 820, 80);
+  const s = lerp(2.4, 1, eOut(k / 0.3)) * (1 + 0.03 * env(t, KICKS, 12));
+  pyramid(W / 2, 820, 1080, t, { s, rot: (1 - eOut(k / 0.4)) * 0.25, fill: 0.15 + 0.1 * eOut3(k / 1.6) });
+  if (t >= 2.0) punch('Liquid Ponzi.', W / 2, 1420, t - 2.0, { size: fit('Liquid Ponzi.', 920, 120), color: 'lp', from: 0.3 });
+  if (t >= 2.4) pop(t, 2.4, W / 2, 1560, () => chip('$LP', W / 2, 1560, 46, 'rgba(255,120,63,.14)', C.orange, C.orange), 0.45);
+}
+function sFeed(t) { // 3.2-4.8  launch on pump, feed the pyramid
+  bg(t);
+  const fill = 0.25 + 0.45 * eOut3(P(t, 3.2, 4.7));
+  pyramid(W / 2, 1060, 1000, t, { fill, s: 1 + 0.03 * env(t, KICKS, 12) });
+  // coins rain into the apex
+  [3.2, 3.4, 3.6, 3.8, 4.0, 4.2].forEach((t0, i) => {
+    const k = t - t0; if (k < 0 || k > 0.5) return;
+    const p = eIn(k / 0.5);
+    const sx = W / 2 + (hash(i) - 0.5) * 700, sy = 520;
+    coin(lerp(sx, W / 2, p), lerp(sy, 700, p), lerp(70, 26, p), '$', k * 18);
+  });
+  punch('LAUNCH ON PUMP.', W / 2, 330, t - 3.2, { size: fit('LAUNCH ON PUMP.', 900, 96), from: 0.3 });
+  if (t >= 4.0) punch('FEED THE PYRAMID.', W / 2, 470, t - 4.0, { size: fit('FEED THE PYRAMID.', 900, 96), color: 'lp', from: 0.3 });
+  txt('Liquid Ponzi is the dev of every coin on the pad.', W / 2, 1640, { size: 36, body: true, weight: 600, color: C.muted, alpha: P(t, 3.6, 3.9) });
+}
+function sSplit(t) { // 4.8-7.2  80% liquidity / 20% buy & burn $LP
+  bg(t);
+  txt('CREATOR FEES', W / 2, 300, { size: 54, weight: 800, ls: 6, color: C.muted, alpha: eOut3(P(t, 4.8, 5.0)) });
+  // 80%: liquid bar filling
+  pop(t, 4.8, W / 2, 560, () => {
+    txt('80%', W / 2, 620, { size: 280, color: 'lp', glow: 40 });
+    txt('builds its own liquidity', W / 2, 720, { size: 44, body: true, weight: 700 });
+    txt('once it bonds', W / 2, 776, { size: 36, body: true, weight: 600, color: C.muted });
+  }, 0.35);
+  const lf = eOut3(P(t, 4.9, 5.8));
+  rrect(140, 830, 800, 44, 22, 'rgba(199,162,255,.1)');
+  ctx.save(); ctx.beginPath(); ctx.roundRect(140, 830, 800, 44, 22); ctx.clip();
+  const lg = ctx.createLinearGradient(140, 0, 940, 0); lg.addColorStop(0, C.violet2); lg.addColorStop(1, C.peach);
+  ctx.fillStyle = lg; ctx.beginPath(); ctx.moveTo(140, 874);
+  for (let x = 140; x <= 140 + 800 * lf; x += 6) ctx.lineTo(x, 834 + Math.sin(x * 0.05 + t * 12) * 4);
+  ctx.lineTo(140 + 800 * lf, 874); ctx.closePath(); ctx.fill(); ctx.restore();
+  // 20%: buy back and burn, with embers
+  if (t >= 5.6) {
+    pop(t, 5.6, W / 2, 1100, () => {
+      txt('20%', W / 2, 1160, { size: 280, color: 'fire', glow: 40, glowColor: 'rgba(255,120,63,.8)' });
+      txt('buys back & burns $LP', W / 2, 1260, { size: 44, body: true, weight: 700 });
+    }, 0.35);
+    for (let i = 0; i < 40; i++) {
+      const life = 0.9 + 0.8 * hash(i), ph = ((t - 5.6) / life + hash(i + 3)) % 1;
+      const x = W / 2 + (hash(i + 1) - 0.5) * 700 + Math.sin(t * 3 + i) * 20, y = 1300 - ph * 420;
+      ctx.globalAlpha = Math.sin(Math.PI * ph) * 0.9; ctx.fillStyle = i % 3 ? C.orange : '#ffd27a';
+      ctx.beginPath(); ctx.arc(x, y, (3 + 5 * hash(i + 2)) * (1 - ph), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (t >= 6.4) pop(t, 6.4, W / 2, 1500, () => {
+    rrect(150, 1420, 780, 150, 30, 'rgba(25,19,33,.9)', C.line, 2);
+    txt('PAIRED WITH SOL. LOCKED.', W / 2, 1490, { size: fit('PAIRED WITH SOL. LOCKED.', 700, 48), weight: 800, ls: 0 });
+    txt('Pool fees stay in the pool and compound.', W / 2, 1540, { size: 30, body: true, weight: 600, color: C.muted });
+  }, 0.3);
+}
+function sOnePool(t) { // 7.2-8.0  MANY COINS. ONE POOL.
+  bg(t, 1.2);
+  const q = P(t, 7.2, 8.0);
+  for (let i = 0; i < 14; i++) { // coins spiralling into the centre
+    const a = i / 14 * Math.PI * 2 + t * 4, r = lerp(520, 40, eIn(q));
+    coin(W / 2 + Math.cos(a) * r, 960 + Math.sin(a) * r * 0.6, 44, '$', t * 6 + i);
+  }
+  punch('MANY COINS.', W / 2, 640, t - 7.2, { size: fit('MANY COINS.', 900, 140), from: 0.35 });
+  if (t >= 7.6) punch('ONE POOL.', W / 2, 1360, t - 7.6, { size: fit('ONE POOL.', 900, 170), color: 'lp', from: 0.4 });
+}
+function sEnd(t) { // 8.0-10.4
+  const k = t - 8.0;
+  bg(t);
+  rings(t, 8.0, W / 2, 720, C.orange);
+  splash(t, 8.0, W / 2, 720, 70);
+  const e = eBack(k / 0.45);
+  pyramid(W / 2, 720, 900, t, { s: lerp(1.4, 1, e), fill: 0.62 + 0.04 * Math.sin(t * 2), glow: 80 });
+  punch('LIQUIDPONZI.FUN', W / 2, 1230, t - 8.0, { size: fit('LIQUIDPONZI.FUN', 900, 96), color: 'lp', from: 0.3 });
+  if (t >= 8.4) pop(t, 8.4, W / 2, 1380, () => {
+    ctx.shadowColor = 'rgba(255,120,63,.85)'; ctx.shadowBlur = 40;
+    rrect(W / 2 - 300, 1320, 600, 116, 20, C.orange); ctx.shadowBlur = 0;
+    txt('Launch a coin  ↗', W / 2, 1396, { size: 48, body: true, weight: 800, color: C.ink });
+  }, 0.3);
+  if (t >= 8.8) pop(t, 8.8, W / 2, 1530, () => chip('$LP', W / 2, 1530, 40, 'rgba(255,120,63,.14)', C.orange, C.orange), 0.3);
+  txt('Independent. Built on Solana and Meteora.', W / 2, 1700, { size: 30, body: true, weight: 600, color: C.muted, alpha: P(t, 9.0, 9.3) });
+}
+
+function render(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  const sh = env(t, BIG, 7) * 34 + env(t, MED, 14) * 12;
+  ctx.save();
+  ctx.translate((hash(t * 133) - .5) * sh, (hash(t * 171) - .5) * sh);
+  const zk = 1 + 0.012 * env(t, KICKS, 14);
+  ctx.translate(W / 2, H / 2); ctx.scale(zk, zk); ctx.translate(-W / 2, -H / 2);
+  if (t < 1.6) sHook(t);
+  else if (t < 3.2) sPyramid(t);
+  else if (t < 4.8) sFeed(t);
+  else if (t < 7.2) sSplit(t);
+  else if (t < 8.0) sOnePool(t);
+  else sEnd(t);
+  ctx.restore();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  for (const g of [1.6, 3.2, 4.8, 7.2, 8.0]) {
+    const k = t - g;
+    if (k >= 0 && k < 0.15) {
+      const f = Math.floor(k * 60);
+      for (let s = 0; s < 10; s++) {
+        const y = Math.floor(hash(s * 7 + g * 3 + f) * H), h = 12 + Math.floor(hash(s * 11 + g) * 90);
+        ctx.drawImage(cv, 0, y, W, h, (hash(s * 13 + f) - .5) * 140 * (1 - k / 0.15), y, W, h);
+      }
+    }
+  }
+  const fl = Math.max(env(t, BIG, 9) * 0.75, env(t, MED, 14) * 0.25);
+  if (fl > 0.005) { ctx.fillStyle = `rgba(245,235,255,${fl})`; ctx.fillRect(0, 0, W, H); }
+  const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.78);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.5)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.globalAlpha = 0.04; ctx.globalCompositeOperation = 'overlay';
+  const fr = Math.floor(t * 30), ox = Math.floor(hash(fr) * 384), oy = Math.floor(hash(fr + 0.5) * 384);
+  for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
+  ctx.restore();
+  const fade = Math.max(1 - P(t, 0, 0.12), P(t, 9.8, 10.4));
+  if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+}
+window.render = render;
+window.DUR = DUR;
+</script>
+</body>
+</html>
