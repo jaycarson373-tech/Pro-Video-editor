@@ -305,7 +305,7 @@ function render(t) {
   const fr = Math.floor(t * 30), ox = Math.floor(hash(fr) * 384), oy = Math.floor(hash(fr + 0.5) * 384);
   for (let x = -ox; x < W; x += 384) for (let y = -oy; y < H; y += 384) ctx.drawImage(GRAIN, x, y);
   ctx.restore();
-  const fade = Math.max(1 - P(t, 0, 0.12), P(t, 9.8, 10.4));
+  const fade = P(t, 9.8, 10.4);
   if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
 }
 window.render = render;
