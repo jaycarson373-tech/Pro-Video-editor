@@ -1,0 +1,8 @@
+{
+  "name": "ponzi-hq",
+  "private": true,
+  "description": "Generator for the Liquid Ponzi HQ video",
+  "dependencies": {
+    "three": "0.170.0"
+  }
+}
